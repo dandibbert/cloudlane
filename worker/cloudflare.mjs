@@ -13,9 +13,23 @@ export class Cloudflare {
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         redirect: 'error', signal: controller.signal
       });
-    } catch {
+    } catch (error) {
       // Never blindly retry a mutation: the server may already have committed it.
-      throw new AppError(method === 'GET' ? 'Cloudflare API 连接超时或网络中断。' : 'Cloudflare API 响应中断；操作可能已生效，任务会先核对远端再继续。', 502, 'CF_NETWORK');
+      // Keep timeout errors distinct from Workers/runtime routing failures so the UI
+      // does not misdiagnose every failed fetch as a timeout.
+      const timedOut = controller.signal.aborted || error?.name === 'AbortError';
+      const reason = String(error?.message || error?.name || 'unknown fetch error')
+        .replaceAll(this.token, '[redacted]')
+        .replace(/\s+/g, ' ')
+        .slice(0, 300);
+      const message = timedOut
+        ? (method === 'GET'
+            ? 'Cloudflare API 请求超时（18 秒）。'
+            : 'Cloudflare API 请求超时；操作结果暂不确定，任务会先核对远端再继续。')
+        : (method === 'GET'
+            ? `Cloudflare API 请求失败：${reason}`
+            : `Cloudflare API 请求失败：${reason}；操作可能已生效，任务会先核对远端再继续。`);
+      throw new AppError(message, 502, 'CF_NETWORK', { reason: timedOut ? 'timeout' : reason });
     } finally { clearTimeout(timeout); }
     let data;
     try { data = await response.json(); } catch { throw new AppError(`Cloudflare API 返回非 JSON 响应（HTTP ${response.status}）。`, 502, 'CF_RESPONSE'); }

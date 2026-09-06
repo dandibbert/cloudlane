@@ -67,4 +67,11 @@ test('auth, CSRF, password rotation, token redaction, and login limits', async (
 });
 test('credential API probes zones, encrypts token, and catalogs cross-account public zone separately', async () => { const f = await fixture(); await f.login(); const result = await f.request('/credentials', 'POST', { accountId: A, label: 'new source', token: 'test-unpersisted-plaintext' }); assert.equal(result.response.status, 201); assert(!JSON.stringify(result.body).includes('token')); const row = await f.ctx.get(`credential:${result.body.id}`); assert(row.secret.data); assert(!JSON.stringify(row).includes('test-unpersisted-plaintext')); const catalog = await f.request('/credentials/cred-2/catalog'); assert.equal(catalog.body.zones[0].id, Z2); });
 test('CF client permits paginated /zones query and sanitizes error token', async () => { let pages = 0; const cf = new Cloudflare('secret123', async url => { pages++; return Response.json({ success: true, result: Array(50).fill({ id: pages }), result_info: { total_pages: 2 } }); }); assert.equal((await cf.list('/zones')).length, 100); assert.equal(pages, 2); const err = new Cloudflare('secret123', async () => Response.json({ success: false, errors: [{ message: 'secret123 bad credential' }] }, { status: 403 })); await assert.rejects(err.get('/zones'), e => e.status === 403 && !e.message.includes('secret123')); });
+test('CF client reports runtime fetch failures without falsely calling them timeouts or leaking the token', async () => {
+  const cf = new Cloudflare('secret123', async () => { throw new TypeError('Workers routing failed for secret123'); });
+  await assert.rejects(cf.get('/zones'), error => error.code === 'CF_NETWORK'
+    && error.message.includes('Workers routing failed')
+    && !error.message.includes('超时')
+    && !error.message.includes('secret123'));
+});
 test('pagination limit stops instead of falsely calling a partial listing complete', async () => { const cf = new Cloudflare('token', async () => Response.json({ success: true, result: Array(50).fill({ id: 'x' }), result_info: { total_pages: 3 } })); await assert.rejects(cf.list('/zones', {}, 2), { code: 'SCAN_LIMIT' }); });

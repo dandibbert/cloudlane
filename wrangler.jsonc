@@ -3,6 +3,7 @@
   "name": "cloudlane",
   "main": "worker/index.mjs",
   "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["global_fetch_strictly_public"],
   "workers_dev": true,
   "assets": {
     "directory": "./public",

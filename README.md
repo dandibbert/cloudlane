@@ -4,7 +4,7 @@
 
 Cloudlane 是面向个人或小团队管理员的自托管面板。它运行在 Cloudflare Workers，使用一个 SQLite-backed Durable Object 保存凭据密文、配置、变更计划和任务。前端为原生 JavaScript/CSS，无运行时依赖、外部字体或分析脚本。界面使用粉、蓝、白配色，支持桌面和手机。
 
-> 版本：0.2.0。已实现真实 Cloudflare API 调用、远端状态同步、持久化任务与受保护的云端删除代码，通过模拟 Cloudflare API 的后端测试与离线浏览器测试。交付环境没有接入真实 Cloudflare 账户，**没有完成生产部署、真实证书签发联调或 Wrangler dry-run**。先用一个非关键测试子域名验收，再管理已有业务。
+> 版本：0.2.1。已实现真实 Cloudflare API 调用、远端状态同步、持久化任务与受保护的云端删除代码，通过模拟 Cloudflare API 的后端测试与离线浏览器测试。Workers 配置启用了 `global_fetch_strictly_public`，确保对 Cloudflare API 的全局 `fetch()` 按公网路由；API fetch 失败也会区分真正超时与运行时/网络错误。先用一个非关键测试子域名验收，再管理已有业务。
 
 ## 先看界面
 
