@@ -12,7 +12,10 @@ export class Cloudflare {
       const init = {
         method, headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-        redirect: 'error', signal: controller.signal
+        // workerd currently accepts only follow/manual for outbound fetch(). Keep redirects
+        // manual so Authorization is never forwarded to another host, then reject any
+        // 3xx response explicitly below.
+        redirect: 'manual', signal: controller.signal
       };
       // Workers' native fetch is receiver-sensitive. Never store the bare global
       // function on an instance and later invoke it as `this.fetcher(...)`, because
@@ -43,6 +46,15 @@ export class Cloudflare {
             : `Cloudflare API 请求失败：${reason}；操作可能已生效，任务会先核对远端再继续。`);
       throw new AppError(message, 502, 'CF_NETWORK', { reason: timedOut ? 'timeout' : reason });
     } finally { clearTimeout(timeout); }
+    if (response.status >= 300 && response.status < 400) {
+      const location = String(response.headers.get('Location') || '').slice(0, 300);
+      throw new AppError(
+        `Cloudflare API 返回重定向（HTTP ${response.status}），已拒绝自动跟随${location ? `：${location}` : '。'}`,
+        502,
+        'CF_REDIRECT',
+        { status: response.status, location }
+      );
+    }
     let data;
     try { data = await response.json(); } catch { throw new AppError(`Cloudflare API 返回非 JSON 响应（HTTP ${response.status}）。`, 502, 'CF_RESPONSE'); }
     if (!response.ok || data.success === false) {
