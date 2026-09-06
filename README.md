@@ -4,7 +4,7 @@
 
 Cloudlane 是面向个人或小团队管理员的自托管面板。它运行在 Cloudflare Workers，使用一个 SQLite-backed Durable Object 保存凭据密文、配置、变更计划和任务。前端为原生 JavaScript/CSS，无运行时依赖、外部字体或分析脚本。界面使用粉、蓝、白配色，支持桌面和手机。
 
-> 版本：0.2.4。已实现真实 Cloudflare API 调用、远端状态同步、首次无方案自动发现、持久化任务与受保护的云端删除代码。保存业务凭据后，即使本地还没有配置方案，也会只读扫描可访问的 Zone / SaaS Custom Hostname / Tunnel / DNS；只有完整链路无歧义时才自动创建本地方案与导入映射，整个发现过程不会修改 Cloudflare。Workers API 调用继续使用 `global_fetch_strictly_public`、正确的原生 `fetch` receiver 与 `redirect: manual`。
+> 版本：0.2.5。已实现真实 Cloudflare API 调用、远端状态同步、首次无方案自动发现、持久化任务与受保护的云端删除代码。控制台现在以 **Tunnel → service** 为主干组织访问域名；同一个 custom origin 可以被多个 SaaS Custom Hostname 正常共享，只要它们属于同一源 Zone / Tunnel 且实际 ingress 能与同一个 service 对上。保存业务凭据后，即使本地还没有配置方案，也会只读扫描可访问的 Zone / SaaS Custom Hostname / Tunnel / DNS；整个发现过程不会修改 Cloudflare。
 
 ## 先看界面
 
@@ -111,7 +111,7 @@ Cloudflare 的套餐、SaaS 额度、Workers/DO 配额与费用以账户当前�
 
 Cloudflare 才是网络配置的事实源。Cloudlane 的 Durable Object 保存的是**管理映射、显示名称/备注、凭据引用、任务/审计和最近一次远端快照**，而不是拿一份本地表格假装云端仍然如此。
 
-登录后会主动同步真实的 Tunnel 配置、Custom Hostnames、源 Zone DNS、访问 Zone DNS 与 Fallback Origin。**没有任何配置方案时也不是空操作**：面板先进行一次只读拓扑发现，根据远端已有链路自动建立无歧义的本地方案与导入映射；如果无法安全判断，会把原因保存在最近一次拓扑扫描结果中，而不是猜一个方案。已有方案继续按方案深度同步；手动“从 Cloudflare 同步”会立即重读，页面可见时也会周期性刷新。常规 UI 状态轮询只读本地快照，避免每 20 秒对 Cloudflare 全量扫一次。
+登录后会主动同步真实的 Tunnel 配置、Custom Hostnames、源 Zone DNS、访问 Zone DNS 与 Fallback Origin。**没有任何配置方案时也不是空操作**：面板先进行一次只读拓扑发现，根据远端已有链路自动建立无歧义的本地方案与导入映射；如果无法安全判断，会把原因保存在最近一次拓扑扫描结果中，而不是猜一个方案。已有方案继续按方案深度同步。主界面按 **源账户 / 源 Zone / Tunnel / service** 聚合，再把一个或多个 source hostname、Public Zone 与访问 hostname 挂到对应服务下面；手动“从 Cloudflare 同步”会立即重读，页面可见时也会周期性刷新。
 
 如果远端 service、custom origin、优选 CNAME 或其它受管值被手工改动，卡片优先显示最近同步到的真实值，并把相对管理映射的差异标成 drift；修改前仍会重新读取并比较快照。
 
@@ -134,7 +134,7 @@ Cloudflare 才是网络配置的事实源。Cloudlane 的 Durable Object 保存�
 
 ## 范围与明确限制
 
-本版支持远程管理的 Tunnel、两个独立 Zone 下的确切 HTTP/HTTPS 子域名。同一面板可以管理多套这样的组合。以下情况会明确拦截，不把复杂资源当简单记录覆盖：本地 `config.yml` Tunnel、apex/通配符、同 hostname 多条路径规则、两条规则不一致、多个访问域名共享一个源 hostname、跨服务域名归属冲突。
+本版支持远程管理的 Tunnel、多个 Zone 下的确切 HTTP/HTTPS 子域名。同一源 hostname 可以被多个 SaaS Custom Hostname / 访问域名共享，也可以跨不同访问 Zone 复用；单条删除会检测剩余引用并保留共享的源 DNS 与 origin ingress。以下情况会明确拦截，不把复杂资源当简单记录覆盖：本地 `config.yml` Tunnel、apex/通配符、同 hostname 多条路径规则、同一源 hostname 实际落到不同 source Zone / Tunnel、MAIN 与 ORIGIN 的 service 或显式回源参数冲突，以及其它无法唯一归属的跨服务配置。
 
 这里的“多账户”指一个管理员管理自己的多套 Cloudflare 凭据，不是多人 RBAC/多租户 SaaS。没有多人权限、OIDC、租户隔离、外部通知、网络测速或自动选 IP。`healthy` 只展示连接器状态；`ready` 是控制面配置就绪，不表示从家宽/移动网络验证过本地服务、证书握手、HTTP 响应或优选效果。
 

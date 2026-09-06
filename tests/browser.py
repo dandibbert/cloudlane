@@ -48,6 +48,8 @@ with sync_playwright() as p:
 
     reset()
     checked('desktop has six sample cards, and no horizontal overflow', page.evaluate('document.documentElement.scrollWidth <= innerWidth'))
+    expect(page.locator('.service-cluster')).to_have_count(6)
+    checked('desktop groups public hostnames under Tunnel service clusters')
     domain_lefts = page.locator('.record-card .domain-map').evaluate_all('(xs) => xs.map(x => Math.round(x.getBoundingClientRect().left))')
     status_lefts = page.locator('.record-card .record-status').evaluate_all('(xs) => xs.map(x => Math.round(x.getBoundingClientRect().left))')
     checked('desktop cards share aligned domain and status columns', max(domain_lefts) - min(domain_lefts) <= 1 and max(status_lefts) - min(status_lefts) <= 1)

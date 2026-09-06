@@ -13,6 +13,8 @@
 
 使用一个 DO 统一协调是有意取舍：个人面板通常跨方案修改同一个 Tunnel 或共享入口，需要可理解的串行控制。没有 D1 与 DO 两套数据库之间的一致性问题，也不用浏览器轮询来驱动任务。此设计不宣称适用于大规模多租户；未来扩容需要先明确 Tunnel/Zone/共享资源的锁归属，再分片，不能简单按记录拆开并发写整份 Tunnel 配置。
 
+展示层以 **source account / source Zone / Tunnel / service** 作为服务主键，把 public hostname 当作服务下的访问叶子。`route:` 仍然是一条 public hostname 的管理映射，因为 SaaS 证书、访问 DNS、删除与审计都以 public hostname 为粒度；但多个 route 可以合法共享同一个 `originHostname`。只要这些 route 指向同一 source Zone / Tunnel，实际 origin ingress 的 service 与显式 `originRequest` 一致，就不要求 1:1 的 origin/public 关系。单条删除通过当前 Custom Hostname 引用计数判断是否保留共享 origin DNS / ingress。
+
 前端没有框架构建运行时，使用 ES modules、静态 SVG 图标和 CSS。部署目录是 `public/`，Worker 入口是 `worker/index.mjs`。`npm run build` 检查语法并生成离线演示，不负责调用 Cloudflare；正式 Worker 打包由 Wrangler 完成。
 
 ## 存储模型
@@ -96,6 +98,7 @@ Tunnel PUT 会替换**配置对象**，不是删除/重建 Tunnel 本身。代�
 | POST `/profiles`；PUT/DELETE `/profiles/:id` | 配置方案 |
 | POST `/profiles/:id/discover`、`/import` | 只读发现、只登记导入 |
 | POST `/profiles/:id/sync` | 按方案从 Cloudflare 深度同步当前 Tunnel/SaaS/DNS/Fallback，并刷新已管理记录与导入候选 |
+| POST `/topology/sync` | 无方案/全局只读拓扑发现；按 Tunnel/service 推断现有链路并可仅在本地建立映射 |
 | POST `/profiles/:id/edge-plan` | 共享入口独立变更预览 |
 | POST `/plans`、`/plans/:id/apply` | 新建/编辑预览、确认执行 |
 | GET `/jobs/:id` | 详细动作日志 |

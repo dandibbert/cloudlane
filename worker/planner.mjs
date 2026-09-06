@@ -84,7 +84,23 @@ export async function buildRoutePlan(ctx, input, routeId = undefined) {
     requireThat(previous.profileId === spec.profileId && previous.originHostname === spec.originHostname && previous.publicHostname === spec.publicHostname, '编辑时不改变域名或 Tunnel 归属；迁移请新建记录，验证后再撤下旧记录。', 409, 'MIGRATION_REQUIRED');
   }
   const routes = await ctx.list('route:');
-  requireThat(!routes.some(r => r.id !== routeId && (r.publicHostname === spec.publicHostname || r.originHostname === spec.originHostname)), '这个访问域名或源域名已被另一条记录管理。', 409, 'DUPLICATE_ROUTE');
+  requireThat(!routes.some(r => r.id !== routeId && r.publicHostname === spec.publicHostname), '这个访问域名已被另一条记录管理。', 409, 'DUPLICATE_ROUTE');
+  // One custom origin may legitimately serve many public hostnames.  The shared origin is
+  // safe to reuse as long as every local mapping that references it belongs to the same
+  // source Zone + Tunnel.  Public Zone / edge hostname may differ between profiles.
+  const sharedOriginRoutes = routes.filter(r => r.id !== routeId && cleanDNSName(r.originHostname) === cleanDNSName(spec.originHostname));
+  if (sharedOriginRoutes.length) {
+    const profiles = await ctx.list('profile:');
+    const profileById = new Map(profiles.map(p => [p.id, p]));
+    for (const route of sharedOriginRoutes) {
+      const owner = profileById.get(route.profileId);
+      requireThat(owner
+        && owner.accountId === profile.accountId
+        && owner.sourceZone?.id === profile.sourceZone.id
+        && owner.tunnelId === profile.tunnelId,
+      `${spec.originHostname} 已被另一套源 Zone / Tunnel 使用；不能把同一个源域名跨源拓扑复用。`, 409, 'DUPLICATE_ROUTE');
+    }
+  }
   await ctx.ensureIdle(routeId, profile.tunnelId);
   const { tunnel } = await validateProfileLive(ctx, profile);
   const src = await ctx.client(profile.sourceCredentialId);
@@ -92,9 +108,16 @@ export async function buildRoutePlan(ctx, input, routeId = undefined) {
   const add = a => { if (a) actions.push(a); };
   if (tunnel.status !== 'healthy') warnings.push(`Tunnel 状态为 ${tunnel.status || 'unknown'}。这不代表本地服务可用，最终访问仍需从你的设备验证。`);
   const config = await src.get(tunnelPath(profile));
+  // If this is another public alias of an existing origin, inherit the origin rule's
+  // originRequest when the user did not explicitly supply one.  That keeps MAIN / ORIGIN
+  // behavior consistent without asking the user to duplicate advanced settings.
+  const liveOriginRules = matchingIngress(config.config, spec.originHostname);
+  if (spec.originRequest === undefined && liveOriginRules.length === 1 && !liveOriginRules[0]?.path && liveOriginRules[0].originRequest !== undefined) {
+    spec.originRequest = clone(liveOriginRules[0].originRequest);
+  }
   const rules = [spec.originHostname, spec.publicHostname].map(h => ({ hostname: h, service: spec.service, ...(spec.originRequest === undefined ? {} : { originRequest: spec.originRequest }) }));
   const merged = mergeIngress(config.config, rules, !!previous);
-  if (!equal(config.config, merged)) add(mutation('tunnel', '更新 2 条 Tunnel ingress（其它规则保持不变）', profile.sourceCredentialId, tunnelPath(profile), { id: profile.tunnelId, value: config.config }, merged, { phase: 'setup', role: 'tunnel', touchedHostnames: [spec.originHostname, spec.publicHostname] }));
+  if (!equal(config.config, merged)) add(mutation('tunnel', '同步目标 Tunnel ingress（其它规则保持不变）', profile.sourceCredentialId, tunnelPath(profile), { id: profile.tunnelId, value: config.config }, merged, { phase: 'setup', role: 'tunnel', touchedHostnames: [spec.originHostname, spec.publicHostname] }));
 
   // If an entry is already configured, never overwrite it as a side effect of adding a route.
   const edgeRecords = await src.dns(profile.sourceZone.id, spec.edgeHostname);
@@ -439,7 +462,9 @@ export async function discoverRemoteTopology(ctx, { adopt = false } = {}) {
         await ctx.put(`profile:${profile.id}`, profile); existingProfiles.push(profile); adoptedProfiles++;
       }
       for (const record of group.records) {
-        if (existingRoutes.some(r => r.publicHostname === record.publicHostname || r.originHostname === record.originHostname)) continue;
+        // Public hostname is the unique managed leaf.  An origin hostname is intentionally
+        // reusable by multiple SaaS custom hostnames and therefore must not suppress adoption.
+        if (existingRoutes.some(r => r.publicHostname === record.publicHostname)) continue;
         const drift = [];
         if (group.fallbackStatus !== 'active') drift.push(`SaaS 备用源状态：${group.fallbackStatus}`);
         const observed = {
@@ -507,7 +532,9 @@ function candidateFromSnapshot(profile, snap, ch, managed) {
   const origin = matchingIngress(snap.config.config, ch.custom_origin_server);
   if (!main.length && !origin.length) return null;
   const errors = [];
-  if (managed.some(r => r.originHostname === ch.custom_origin_server) || snap.customs.filter(c => c.custom_origin_server === ch.custom_origin_server).length > 1) errors.push('源域名被多条记录共享，需要人工确认所有权');
+  // A shared custom origin is normal: many public SaaS hostnames may map to the same
+  // origin hostname.  Ownership is determined by the source Zone/Tunnel and the exact
+  // MAIN / ORIGIN ingress pair below, not by requiring a 1:1 origin-to-public mapping.
   if (main.length !== 1 || origin.length !== 1 || main[0]?.path || origin[0]?.path) errors.push('缺少成对规则，或存在路径/重复规则');
   if (main[0]?.service !== origin[0]?.service) errors.push('两个 hostname 对应不同服务');
   if (!equal(main[0]?.originRequest || {}, origin[0]?.originRequest || {})) errors.push('两个 hostname 的 originRequest 不同，需要人工确认');

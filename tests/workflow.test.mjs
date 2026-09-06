@@ -56,7 +56,33 @@ test('expired preview, maximum waiting period and detach/retry are guarded', asy
   assert.equal((await f.request(`/routes/${plan.routeId}`, 'DELETE', { acknowledge: true, confirmHostname: spec.publicHostname })).response.status, 200); assert.equal((await f.request(`/jobs/${job.id}/retry`, 'POST', {})).body.error.code, 'ROUTE_DETACHED'); assert.equal(f.cf.writes().length, count);
 });
 test('missing fallback requires explicit opt-in; shared infrastructure retained on rollback', async () => { const f = await fixture(); f.cf.fallback = null; await assert.rejects(buildRoutePlan(f.ctx, spec), { code: 'FALLBACK_MISSING' }); await f.ctx.put('profile:profile-1', { ...profile, initializeFallback: true }); const plan = await buildRoutePlan(f.ctx, spec); assert(plan.actions.some(a => a.kind === 'fallback')); assert(plan.actions.filter(a => a.role === 'shared_fallback').length === 2); });
-test('same origin is not managed twice through different profiles', async () => { const f = await fixture(); await f.ctx.put('route:existing', { ...spec, id: 'existing', profileId: 'another', publicHostname: 'other.b.example' }); await assert.rejects(buildRoutePlan(f.ctx, spec), { code: 'DUPLICATE_ROUTE' }); });
+test('one origin may serve multiple public hostnames across profiles that share the same source Tunnel', async () => {
+  const f = await fixture();
+  const sharedOptions = { connectTimeout: 7 };
+  f.cf.config.ingress = [
+    { hostname: spec.originHostname, service: spec.service, originRequest: sharedOptions },
+    { hostname: 'other.b.example', service: spec.service, originRequest: sharedOptions },
+    { service: 'http_status:404' }
+  ];
+  f.cf.rows(Z1).push({ id: 'shared-origin-existing', type: 'CNAME', name: spec.originHostname, content: `${T}.cfargotunnel.com`, ttl: 1, proxied: true });
+  await f.ctx.put('profile:another', { ...profile, id: 'another', name: 'Another public-zone view' });
+  await f.ctx.put('route:existing', { ...spec, id: 'existing', profileId: 'another', publicHostname: 'other.b.example', originRequest: sharedOptions });
+  const plan = await buildRoutePlan(f.ctx, spec);
+  assert.equal(plan.spec.originHostname, spec.originHostname);
+  assert.deepEqual(plan.spec.originRequest, sharedOptions);
+  const tunnel = plan.actions.find(a => a.kind === 'tunnel');
+  assert(tunnel);
+  assert.equal(tunnel.after.ingress.filter(r => r.hostname === spec.originHostname).length, 1);
+  assert.equal(tunnel.after.ingress.filter(r => r.hostname === spec.publicHostname).length, 1);
+  assert.deepEqual(tunnel.after.ingress.find(r => r.hostname === spec.publicHostname).originRequest, sharedOptions);
+  assert(!plan.actions.some(a => a.role === 'origin'));
+});
+test('the same origin cannot be reused by a different source Tunnel topology', async () => {
+  const f = await fixture();
+  await f.ctx.put('profile:another', { ...profile, id: 'another', tunnelId: '00000000-0000-4000-8000-000000000099' });
+  await f.ctx.put('route:existing', { ...spec, id: 'existing', profileId: 'another', publicHostname: 'other.b.example' });
+  await assert.rejects(buildRoutePlan(f.ctx, spec), { code: 'DUPLICATE_ROUTE' });
+});
 test('auth, CSRF, password rotation, token redaction, and login limits', async () => {
   const f = await fixture(); assert.equal((await f.request('/state')).response.status, 401); const result = await f.login(); assert.equal(result.response.status, 200); assert.match(result.response.headers.get('set-cookie'), /HttpOnly; SameSite=Strict.*Secure/);
   const state = await f.request('/state'); assert(!JSON.stringify(state.body).includes('source-token')); assert(!state.body.credentials[0].secret);
@@ -69,27 +95,50 @@ test('credential API probes zones, encrypts token, and catalogs cross-account pu
 test('fresh install discovers existing remote topology and adopts it locally without Cloudflare writes', async () => {
   const f = await fixture();
   await f.ctx.del('profile:profile-1');
+  const alias = 'pixviewer-alt.b.example';
   f.cf.config.ingress = [
     { hostname: spec.originHostname, service: spec.service },
     { hostname: spec.publicHostname, service: spec.service },
+    { hostname: alias, service: spec.service },
     { service: 'http_status:404' }
   ];
   f.cf.rows(Z1).push({ id: 'origin-existing', type: 'CNAME', name: spec.originHostname, content: `${T}.cfargotunnel.com`, ttl: 1, proxied: true });
   f.cf.rows(Z2).push({ id: 'public-existing', type: 'CNAME', name: spec.publicHostname, content: spec.edgeHostname, ttl: 1, proxied: false });
+  f.cf.rows(Z2).push({ id: 'public-alias', type: 'CNAME', name: alias, content: spec.edgeHostname, ttl: 1, proxied: false });
   f.cf.customs.push({ id: 'custom-existing', hostname: spec.publicHostname, custom_origin_server: spec.originHostname, status: 'active', ssl: { status: 'pending_validation' } });
+  f.cf.customs.push({ id: 'custom-alias', hostname: alias, custom_origin_server: spec.originHostname, status: 'active', ssl: { status: 'active' } });
   await f.login();
   const result = await f.request('/topology/sync', 'POST', { adopt: true });
   assert.equal(result.response.status, 200);
   assert.equal(result.body.adoptedProfiles, 1);
-  assert.equal(result.body.adoptedRoutes, 1);
+  assert.equal(result.body.adoptedRoutes, 2);
   assert.equal(f.cf.writes().length, 0);
   const state = await f.request('/state');
   assert.equal(state.body.profiles.length, 1);
-  assert.equal(state.body.routes.length, 1);
-  assert.equal(state.body.routes[0].imported, true);
-  assert.equal(state.body.routes[0].maintenanceEnabled, false);
-  assert.equal(state.body.routes[0].observed.sslStatus, 'pending_validation');
+  assert.equal(state.body.routes.length, 2);
+  assert(state.body.routes.every(r => r.imported && r.maintenanceEnabled === false));
+  assert(state.body.routes.every(r => r.originHostname === spec.originHostname));
+  assert(state.body.routes.some(r => r.observed.sslStatus === 'pending_validation'));
   assert(state.body.topology.checkedAt > 0);
+});
+test('profile discovery treats a shared origin as a normal importable topology', async () => {
+  const f = await fixture();
+  const managedPublic = 'managed.b.example';
+  f.cf.config.ingress = [
+    { hostname: spec.originHostname, service: spec.service },
+    { hostname: managedPublic, service: spec.service },
+    { hostname: spec.publicHostname, service: spec.service },
+    { service: 'http_status:404' }
+  ];
+  f.cf.rows(Z1).push({ id: 'shared-origin-dns', type: 'CNAME', name: spec.originHostname, content: `${T}.cfargotunnel.com`, ttl: 1, proxied: true });
+  f.cf.rows(Z2).push({ id: 'candidate-public', type: 'CNAME', name: spec.publicHostname, content: spec.edgeHostname, ttl: 1, proxied: false });
+  f.cf.customs.push({ id: 'candidate-custom', hostname: spec.publicHostname, custom_origin_server: spec.originHostname, status: 'active', ssl: { status: 'active' } });
+  await f.ctx.put('route:managed', { ...spec, id: 'managed', publicHostname: managedPublic });
+  const candidates = await discoverRoutes(f.ctx, profile);
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0].publicHostname, spec.publicHostname);
+  assert.equal(candidates[0].importable, true);
+  assert(!candidates[0].errors.some(e => e.includes('共享')));
 });
 test('topology discovery supports one credential covering both source and public zones in the same account', async () => {
   const f = await fixture();

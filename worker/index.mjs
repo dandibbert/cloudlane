@@ -85,7 +85,7 @@ export class ControlPlane {
     if (path === '/api/bootstrap' && method === 'GET') {
       let setupError = null;
       try { await validateSecrets(this.env); } catch (e) { setupError = e.message; }
-      return json({ configured: !setupError, setupError, authenticated: !!(await this.authenticated(request)), version: '0.2.4' });
+      return json({ configured: !setupError, setupError, authenticated: !!(await this.authenticated(request)), version: '0.2.5' });
     }
     if (path === '/api/login' && method === 'POST') {
       await validateSecrets(this.env);
