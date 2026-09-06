@@ -1,12 +1,12 @@
 # 测试结果与验收边界
 
-执行日期：2026-09-06。版本：0.2.3。
+执行日期：2026-09-06。版本：0.2.4。
 
 ## 本次确实执行的检查
 
 | 检查 | 结果 | 使用的环境 |
 | --- | --- | --- |
-| Node 后端/核心/工作流/安全回归 | 66/66 通过 | Node 22，Cloudflare API 使用可控 mock，DO storage 使用内存实现 |
+| Node 后端/核心/工作流/安全回归 | 68/68 通过 | Node 22，Cloudflare API 使用可控 mock，DO storage 使用内存实现 |
 | JavaScript 语法检查 | 15 个模块通过 | `node --check` |
 | 离线演示构建 | 通过 | 自包含 HTML，无第三方运行时资源 |
 | Wrangler Workers 打包 dry-run | 通过 | Wrangler 4.129.0；DO / Assets / vars 绑定均成功解析 |
@@ -16,7 +16,7 @@
 
 原始结果位于 `test-results/backend.tap` 和 `test-results/browser-report.json`。截图同目录。
 
-## 66 项后端测试覆盖
+## 68 项后端测试覆盖
 
 核心域名/IDN/IPv6/服务 URL 验证、apex 与循环拒绝、Tunnel 未知字段/回源参数/catch-all 保留、通配符优先级、重复/path 规则拒绝、DNS canonical form、AES-GCM 随机性和 AAD、Secrets fail-closed。
 
@@ -24,7 +24,7 @@
 
 v0.2 新增回归直接覆盖：按 profile 从真实 mock Cloudflare 深度同步并刷新卡片远端值且同步过程零写入；破坏性云端删除只删除该 route 可明确归属的 DNS/Custom Hostname/精确 ingress，保留无关 Tunnel 顶层字段、其它 ingress、共享入口和 Fallback；另一个 Custom Hostname 共享同一 origin 时，源 DNS 与 origin ingress 必须保留。
 
-额外回归涵盖共享入口真实 DNS 和本地预设共同撤销、Custom Hostname TLS 参数被外部修改时禁止删除、SaaS 创建响应中断后的不确定归属保护、显式验证刷新保留原 method/type、手工证书不可误刷新、fallback 丢失不会显示 ready、终止验证状态、导入记录不自动写维护、撤销预览过期/元数据保护、长 hostname 的证书 branding，以及 Workers 原生 `fetch` 的 receiver 保持、`manual` redirect 模式与 3xx 显式拒绝。
+额外回归涵盖共享入口真实 DNS 和本地预设共同撤销、Custom Hostname TLS 参数被外部修改时禁止删除、SaaS 创建响应中断后的不确定归属保护、显式验证刷新保留原 method/type、手工证书不可误刷新、fallback 丢失不会显示 ready、终止验证状态、导入记录不自动写维护、撤销预览过期/元数据保护、长 hostname 的证书 branding，以及 Workers 原生 `fetch` 的 receiver 保持、`manual` redirect 模式与 3xx 显式拒绝。v0.2.4 另外覆盖**零配置方案首次启动**：从远端 SaaS 回源 + 源 DNS + Tunnel 双 ingress + 访问 DNS 推断已有拓扑，只创建本地方案/记录，Cloudflare 写请求数保持 0，自动导入记录默认关闭证书维护。
 
 Mock 会故意在返回中放入哨兵私钥字符串，测试确保其不进入持久化状态；这不是任何真实凭据。网络中断测试可模拟远端已提交但客户端未收到响应，不只模拟请求发出前失败。
 

@@ -4,12 +4,12 @@ import { demoState, demoRequest } from './demo.mjs';
 const isDemo = window.CLOUDLANE_OFFLINE_DEMO === true || new URLSearchParams(location.search).get('demo') === '1';
 const memory = isDemo ? demoState() : null;
 const demoPlans = new Map();
-const S = { demo: isDemo, authenticated: isDemo, configured: true, setupError: '', loading: !isDemo, page: 'routes', data: memory || { credentials: [], profiles: [], routes: [], jobs: [], events: [], discoveries: [] }, modal: null, draft: {}, error: '', busy: false, syncing: false, syncError: '', search: '', filterProfile: '', tab: 'all', catalogs: {}, candidates: [], selected: new Set(), mobileMenu: false, lastLoaded: null };
+const S = { demo: isDemo, authenticated: isDemo, configured: true, setupError: '', loading: !isDemo, page: 'routes', data: memory || { credentials: [], profiles: [], routes: [], jobs: [], events: [], discoveries: [], topology: null }, modal: null, draft: {}, error: '', busy: false, syncing: false, syncError: '', search: '', filterProfile: '', tab: 'all', catalogs: {}, candidates: [], selected: new Set(), mobileMenu: false, lastLoaded: null };
 const root = document.getElementById('app');
 const byId = (group, id) => S.data[group]?.find(x => x.id === id);
 const profileOf = route => byId('profiles', route.profileId);
 const liveOf = route => ({ ...route, ...(route.remote || {}) });
-const remoteStamp = () => Math.max(0, ...S.data.routes.map(r => r.lastRemoteSyncAt || r.remote?.syncedAt || 0), ...(S.data.discoveries || []).map(d => d.checkedAt || 0));
+const remoteStamp = () => Math.max(0, S.data.topology?.checkedAt || 0, ...S.data.routes.map(r => r.lastRemoteSyncAt || r.remote?.syncedAt || 0), ...(S.data.discoveries || []).map(d => d.checkedAt || 0));
 const activeJobs = () => S.data.jobs.filter(j => ['queued', 'running', 'waiting', 'retrying'].includes(j.status));
 const optionize = (items, key = 'name') => items.map(x => ({ value: x.id, label: x[key] }));
 const jobOf = route => S.data.jobs.find(j => j.id === route.pendingJobId);
@@ -47,6 +47,19 @@ async function syncAllProfiles({ notify = false } = {}) {
   S.syncing = true; S.syncError = ''; render();
   const failures = [];
   try {
+    // A fresh installation has credentials but no local profile mappings yet. In that case first
+    // perform a read-only topology scan. Unambiguous existing chains are adopted locally only;
+    // Cloudflare is not mutated and certificate maintenance stays disabled for imported routes.
+    if (!S.data.profiles.length && S.data.credentials.length) {
+      try {
+        const topology = await api('/topology/sync', 'POST', { adopt: true });
+        if (!topology.adoptedRoutes && topology.issues?.length) {
+          failures.push(`自动发现: ${topology.issues.slice(0, 3).map(x => `${x.scope ? `${x.scope}: ` : ''}${x.message}`).join('；')}`);
+        }
+      }
+      catch (e) { failures.push(`自动发现: ${e.message}`); }
+      await loadState();
+    }
     for (const profile of S.data.profiles) { try { await api(`/profiles/${profile.id}/sync`, 'POST', {}); } catch (e) { failures.push(`${profile.name}: ${e.message}`); } }
     await loadState();
     S.syncError = failures.join('；');
@@ -110,7 +123,7 @@ function loginView() {
 }
 function shell() {
   const name = navigation.find(n => n[0] === S.page)?.[1] || '优选记录';
-  return html`<div class="app-shell ${S.mobileMenu ? 'menu-open' : ''}"><div class="mobile-backdrop" data-action="menu"></div><aside class="sidebar">${brand()}<div class="workspace"><span class="workspace-avatar">S</span><div><strong>我的工作区</strong><small>${S.demo ? '演示模式' : '自托管管理面板'}</small></div>${ic('down')}</div><div class="nav-heading">工作空间</div><nav class="nav-list" aria-label="主导航">${navigation.slice(0, 4).map(([key, title, glyph]) => navItem(key, title, glyph))}</nav><div class="nav-heading">管理与安全</div><nav class="nav-list" aria-label="管理导航">${navigation.slice(4).map(([key, title, glyph]) => navItem(key, title, glyph))}</nav><div class="sidebar-bottom"><div class="sidebar-hint">${ic('shield')}<strong>每次变更，先有预览</strong><p>保留原有配置<br>只执行你确认过的变更</p></div><div class="version"><span class="dot"></span> Cloudlane <span>v0.2.3</span></div></div></aside><div class="main-shell"><header class="topbar"><div class="breadcrumb">${iconButton('展开导航', 'menu', 'menu', '', `aria-expanded="${S.mobileMenu}"`)}<span>工作空间</span>${ic('chevron')}<strong>${name}</strong></div><div class="topbar-right"><span class="top-status"><span class="dot"></span>${S.demo ? '交互演示 · 不连接 API' : S.syncing ? '正在同步 Cloudflare…' : remoteStamp() ? `Cloudflare 同步于 ${ago(remoteStamp())}` : '等待首次 Cloudflare 同步'}</span>${badge(S.demo ? 'DEMO' : 'SELF-HOSTED', S.demo ? 'pink' : 'blue', 'cloud')}${iconButton('从 Cloudflare 同步', 'refresh-state', 'refresh')}${S.demo ? '' : iconButton('退出登录', 'logout', 'logout')}<div class="avatar">S</div></div></header><main class="main-content" id="main-content">${S.demo ? html`<div class="demo-banner">${ic('spark')}<span>你正在探索演示工作区。这里的记录与状态均为示例，所有操作只在内存中模拟。</span>${button('连接自己的账户', 'leave-demo', 'arrow', 'text-btn')}</div>` : ''}${pages[S.page]()}<footer class="page-footer"><span>Cloudlane · 少一点配置，多一点顺畅。</span><span>配置状态不等于业务可用性 ${ic('shield')}</span></footer></main></div></div>${S.modal ? modalView() : ''}`;
+  return html`<div class="app-shell ${S.mobileMenu ? 'menu-open' : ''}"><div class="mobile-backdrop" data-action="menu"></div><aside class="sidebar">${brand()}<div class="workspace"><span class="workspace-avatar">S</span><div><strong>我的工作区</strong><small>${S.demo ? '演示模式' : '自托管管理面板'}</small></div>${ic('down')}</div><div class="nav-heading">工作空间</div><nav class="nav-list" aria-label="主导航">${navigation.slice(0, 4).map(([key, title, glyph]) => navItem(key, title, glyph))}</nav><div class="nav-heading">管理与安全</div><nav class="nav-list" aria-label="管理导航">${navigation.slice(4).map(([key, title, glyph]) => navItem(key, title, glyph))}</nav><div class="sidebar-bottom"><div class="sidebar-hint">${ic('shield')}<strong>每次变更，先有预览</strong><p>保留原有配置<br>只执行你确认过的变更</p></div><div class="version"><span class="dot"></span> Cloudlane <span>v0.2.4</span></div></div></aside><div class="main-shell"><header class="topbar"><div class="breadcrumb">${iconButton('展开导航', 'menu', 'menu', '', `aria-expanded="${S.mobileMenu}"`)}<span>工作空间</span>${ic('chevron')}<strong>${name}</strong></div><div class="topbar-right"><span class="top-status"><span class="dot"></span>${S.demo ? '交互演示 · 不连接 API' : S.syncing ? '正在同步 Cloudflare…' : remoteStamp() ? `Cloudflare 同步于 ${ago(remoteStamp())}` : '等待首次 Cloudflare 同步'}</span>${badge(S.demo ? 'DEMO' : 'SELF-HOSTED', S.demo ? 'pink' : 'blue', 'cloud')}${iconButton('从 Cloudflare 同步', 'refresh-state', 'refresh')}${S.demo ? '' : iconButton('退出登录', 'logout', 'logout')}<div class="avatar">S</div></div></header><main class="main-content" id="main-content">${S.demo ? html`<div class="demo-banner">${ic('spark')}<span>你正在探索演示工作区。这里的记录与状态均为示例，所有操作只在内存中模拟。</span>${button('连接自己的账户', 'leave-demo', 'arrow', 'text-btn')}</div>` : ''}${pages[S.page]()}<footer class="page-footer"><span>Cloudlane · 少一点配置，多一点顺畅。</span><span>配置状态不等于业务可用性 ${ic('shield')}</span></footer></main></div></div>${S.modal ? modalView() : ''}`;
 }
 function navItem(key, title, glyph) { return html`<button class="nav-item" data-action="navigate" data-id="${key}" ${S.page === key ? raw('aria-current="page"') : ''} title="${title}">${ic(glyph)}<span>${title}</span>${key === 'routes' && S.data.routes.length ? html`<span class="nav-count">${S.data.routes.length}</span>` : key === 'jobs' && activeJobs().length ? html`<span class="nav-count">${activeJobs().length}</span>` : ''}</button>`; }
 function routePage() {
@@ -339,7 +352,13 @@ root.addEventListener('submit', e => {
     if (kind === 'import') { if (!S.selected.size) throw new Error('请先扫描并选择可导入的记录。'); await api(`/profiles/${draft.profileId}/import`, 'POST', { hostnames: [...S.selected] }); }
     if (kind === 'edge') return showPlan(await api(`/profiles/${S.modal.profile.id}/edge-plan`, 'POST', { target: draft.target }));
     if (kind === 'delete') { if (!draft.confirmDelete) throw new Error('请先勾选确认。'); await api(`/${S.modal.category}/${S.modal.id}`, 'DELETE', S.modal.category === 'routes' ? { confirmHostname: S.modal.label } : {}); }
-    await loadState(); S.modal = null; S.draft = {}; S.error = ''; toast(kind === 'import' ? '导入完成，没有修改 Cloudflare' : kind === 'delete' ? '面板记录已移除，Cloudflare 资源保留' : '已保存');
+    await loadState(); S.modal = null; S.draft = {}; S.error = '';
+    if (kind === 'credential') {
+      await syncAllProfiles();
+      toast(S.syncError ? '凭据已保存；自动发现有项目需要检查' : '凭据已保存并完成 Cloudflare 同步', !!S.syncError);
+      return;
+    }
+    toast(kind === 'import' ? '导入完成，没有修改 Cloudflare' : kind === 'delete' ? '面板记录已移除，Cloudflare 资源保留' : '已保存');
   });
 });
 document.addEventListener('keydown', e => {

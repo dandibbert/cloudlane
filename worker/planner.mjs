@@ -294,6 +294,200 @@ export async function observe(ctx, route, profile) {
 
 const cleanDNSName = value => String(value || '').replace(/\.$/, '').toLowerCase();
 const matchingIngress = (config, host) => (config?.ingress || []).filter(r => cleanDNSName(r.hostname) === cleanDNSName(host));
+const tunnelTargetId = value => {
+  const match = cleanDNSName(value).match(/^([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\.cfargotunnel\.com$/i);
+  return match ? match[1].toLowerCase() : null;
+};
+const topologyProfileKey = p => [p.sourceZone.id, p.publicZone.id, p.tunnelId, cleanDNSName(p.edgeHostname)].join(':');
+
+/**
+ * Read-only onboarding discovery for an installation that has credentials but no local profiles yet.
+ * Cloudflare remains the source of truth: we infer a profile only when SaaS custom origin, source DNS,
+ * paired Tunnel ingress and public DNS all point at the same unambiguous chain. `adopt` only creates
+ * local mappings; it never mutates Cloudflare and imported routes have certificate maintenance disabled.
+ */
+export async function discoverRemoteTopology(ctx, { adopt = false } = {}) {
+  const checkedAt = now(), issues = [], groups = new Map();
+  const credentials = await ctx.list('credential:');
+  const zoneRefs = [];
+  const clientByCredential = new Map();
+  const issue = (message, scope = '') => {
+    if (issues.length >= 80) return;
+    issues.push({ scope, message: String(message || '未知扫描错误').replace(/\s+/g, ' ').slice(0, 500) });
+  };
+
+  for (const credential of credentials) {
+    try {
+      const client = await ctx.client(credential.id); clientByCredential.set(credential.id, client);
+      const zones = await client.list('/zones', { 'account.id': credential.accountId });
+      for (const zone of zones.filter(z => z?.id && z?.name && z.status === 'active')) zoneRefs.push({ credential, client, zone });
+    } catch (error) { issue(error.message, credential.label || credential.id); }
+  }
+
+  const configCache = new Map(), tunnelListCache = new Map(), fallbackCache = new Map();
+  for (const sourceRef of zoneRefs) {
+    let customs;
+    try { customs = await sourceRef.client.list(customPath(sourceRef.zone.id)); }
+    catch (error) {
+      // Public-only credentials commonly lack SaaS permissions. That is not a broken installation.
+      if (![403, 404].includes(error.status)) issue(error.message, sourceRef.zone.name);
+      continue;
+    }
+    if (!customs.length) continue;
+    if (customs.length > 80) {
+      issue(`此 Zone 有 ${customs.length} 个 Custom Hostname；首次自动发现只检查前 80 个，请手动创建方案后按方案扫描其余记录。`, sourceRef.zone.name);
+      customs = customs.slice(0, 80);
+    }
+
+    let tunnels = tunnelListCache.get(sourceRef.credential.id);
+    if (!tunnels) {
+      try {
+        tunnels = await sourceRef.client.list(`/accounts/${sourceRef.credential.accountId}/cfd_tunnel`, { is_deleted: 'false' });
+        tunnelListCache.set(sourceRef.credential.id, tunnels);
+      } catch (error) { issue(error.message, sourceRef.credential.label || sourceRef.credential.id); continue; }
+    }
+    const tunnelsById = new Map(tunnels.filter(t => t?.id && !t.deleted_at).map(t => [String(t.id).toLowerCase(), t]));
+
+    let fallback = fallbackCache.get(`${sourceRef.credential.id}:${sourceRef.zone.id}`);
+    if (fallback === undefined) {
+      try { fallback = await sourceRef.client.get(`${customPath(sourceRef.zone.id)}/fallback_origin`); }
+      catch (error) { if (error.status === 404) fallback = null; else { issue(error.message, sourceRef.zone.name); fallback = null; } }
+      fallbackCache.set(`${sourceRef.credential.id}:${sourceRef.zone.id}`, fallback);
+    }
+
+    for (const custom of customs) {
+      const publicHostname = cleanDNSName(custom.hostname), originHostname = cleanDNSName(custom.custom_origin_server);
+      if (!publicHostname || !originHostname || !inZone(originHostname, sourceRef.zone.name) || originHostname === sourceRef.zone.name) continue;
+
+      let originRows;
+      try { originRows = await sourceRef.client.dns(sourceRef.zone.id, originHostname); }
+      catch (error) { issue(error.message, publicHostname); continue; }
+      const originCnames = originRows.filter(r => r.type === 'CNAME' && cleanDNSName(r.name) === originHostname);
+      if (originCnames.length !== 1 || !originCnames[0].proxied) { issue('源域名不是唯一的橙云 CNAME，无法安全推断所属 Tunnel。', publicHostname); continue; }
+      const inferredTunnelId = tunnelTargetId(originCnames[0].content);
+      const tunnel = inferredTunnelId && tunnelsById.get(inferredTunnelId);
+      if (!tunnel || !(tunnel.remote_config === true || tunnel.config_src === 'cloudflare')) { issue('源 DNS 没有指向当前凭据下可远程管理的 Tunnel。', publicHostname); continue; }
+
+      const configKey = `${sourceRef.credential.id}:${inferredTunnelId}`;
+      let config = configCache.get(configKey);
+      if (!config) {
+        try {
+          const result = await sourceRef.client.get(`/accounts/${sourceRef.credential.accountId}/cfd_tunnel/${inferredTunnelId}/configurations`);
+          config = result?.config; configCache.set(configKey, config);
+        } catch (error) { issue(error.message, tunnel.name || inferredTunnelId); continue; }
+      }
+      const main = matchingIngress(config, publicHostname), origin = matchingIngress(config, originHostname);
+      if (main.length !== 1 || origin.length !== 1 || main[0]?.path || origin[0]?.path) { issue('Tunnel 中没有唯一的 MAIN / ORIGIN 成对精确规则。', publicHostname); continue; }
+      if (main[0].service !== origin[0].service || !equal(main[0].originRequest || {}, origin[0].originRequest || {})) { issue('MAIN / ORIGIN 两条 Tunnel 规则的 service 或 originRequest 不一致。', publicHostname); continue; }
+
+      const matchingPublicZones = zoneRefs
+        .filter(ref => ref.zone.id !== sourceRef.zone.id && inZone(publicHostname, ref.zone.name) && publicHostname !== ref.zone.name)
+        .sort((a, b) => b.zone.name.length - a.zone.name.length || String(a.credential.id).localeCompare(String(b.credential.id)));
+      if (!matchingPublicZones.length) { issue('没有任何已保存凭据能够读取此访问域名所属 Zone。', publicHostname); continue; }
+      const longestZone = matchingPublicZones[0].zone.name.length;
+      let publicRef = null, publicRecord = null;
+      for (const ref of matchingPublicZones.filter(x => x.zone.name.length === longestZone)) {
+        try {
+          const rows = await ref.client.dns(ref.zone.id, publicHostname);
+          const cnames = rows.filter(r => r.type === 'CNAME' && cleanDNSName(r.name) === publicHostname);
+          if (rows.length === 1 && cnames.length === 1 && !cnames[0].proxied) { publicRef = ref; publicRecord = cnames[0]; break; }
+        } catch { /* another credential for the same Zone may have the required DNS read scope */ }
+      }
+      if (!publicRef || !publicRecord) { issue('访问域名不是唯一的 DNS-only CNAME，或当前凭据无法读取该 DNS。', publicHostname); continue; }
+      const edgeHostname = cleanDNSName(publicRecord.content);
+      if (!inZone(edgeHostname, sourceRef.zone.name) || edgeHostname === sourceRef.zone.name) { issue(`优选入口 ${edgeHostname || 'unknown'} 不在源 Zone 下，当前版本不会自动接管。`, publicHostname); continue; }
+
+      const tempProfile = {
+        sourceCredentialId: sourceRef.credential.id,
+        publicCredentialId: publicRef.credential.id,
+        accountId: sourceRef.credential.accountId,
+        sourceZone: { id: sourceRef.zone.id, name: sourceRef.zone.name },
+        publicZone: { id: publicRef.zone.id, name: publicRef.zone.name },
+        tunnelId: inferredTunnelId,
+        edgeHostname
+      };
+      try { await checkEdge(ctx, tempProfile, edgeHostname, { originHostname, publicHostname }); }
+      catch (error) { issue(error.message, publicHostname); continue; }
+
+      const key = topologyProfileKey(tempProfile);
+      if (!groups.has(key)) groups.set(key, {
+        key,
+        profile: {
+          ...tempProfile,
+          tunnelName: tunnel.name || inferredTunnelId,
+          name: `自动发现 · ${sourceRef.zone.name} → ${publicRef.zone.name} · ${tunnel.name || inferredTunnelId.slice(0, 8)}`,
+          edgeTarget: '', validationMode: 'auto', initializeFallback: false, autoDiscovered: true
+        },
+        records: [], fallbackStatus: fallback?.status || 'missing', tunnelStatus: tunnel.status || 'unknown'
+      });
+      const group = groups.get(key);
+      if (!group.records.some(r => r.publicHostname === publicHostname)) group.records.push({
+        name: publicHostname.split('.')[0], publicHostname, originHostname, edgeHostname,
+        service: origin[0].service, originRequest: origin[0].originRequest,
+        hostnameStatus: custom.status || 'unknown', sslStatus: custom.ssl?.status || 'missing'
+      });
+    }
+  }
+
+  const existingProfiles = await ctx.list('profile:'), existingRoutes = await ctx.list('route:');
+  let adoptedProfiles = 0, adoptedRoutes = 0;
+  if (adopt) {
+    for (const group of groups.values()) {
+      let profile = existingProfiles.find(p => topologyProfileKey(p) === group.key);
+      if (!profile) {
+        profile = { ...clone(group.profile), id: id(), createdAt: checkedAt, updatedAt: checkedAt };
+        await ctx.put(`profile:${profile.id}`, profile); existingProfiles.push(profile); adoptedProfiles++;
+      }
+      for (const record of group.records) {
+        if (existingRoutes.some(r => r.publicHostname === record.publicHostname || r.originHostname === record.originHostname)) continue;
+        const drift = [];
+        if (group.fallbackStatus !== 'active') drift.push(`SaaS 备用源状态：${group.fallbackStatus}`);
+        const observed = {
+          checkedAt, tunnelStatus: group.tunnelStatus, hostnameStatus: record.hostnameStatus,
+          sslStatus: record.sslStatus, fallbackStatus: group.fallbackStatus, dnsReady: true, drift,
+          edgeChain: [record.edgeHostname], validationErrors: [], hostnameErrors: [], expiresOn: null,
+          originReachability: 'not_tested'
+        };
+        observed.status = summarizeStatus(observed, false);
+        const route = {
+          id: id(), profileId: profile.id, name: record.name, originHostname: record.originHostname,
+          publicHostname: record.publicHostname, edgeHostname: record.edgeHostname, service: record.service,
+          ...(record.originRequest === undefined ? {} : { originRequest: clone(record.originRequest) }),
+          note: '从 Cloudflare 现有配置自动发现并只读导入', cutover: 'when_ready', imported: true,
+          autoDiscovered: true, maintenanceEnabled: false, createdAt: checkedAt, pendingJobId: null,
+          observed, remote: {
+            syncedAt: checkedAt, publicHostname: record.publicHostname, originHostname: record.originHostname,
+            edgeHostname: record.edgeHostname, service: record.service,
+            ...(record.originRequest === undefined ? {} : { originRequest: clone(record.originRequest) }),
+            publicDnsType: 'CNAME', publicDnsProxied: false
+          },
+          lastRemoteSyncAt: checkedAt, nextCheckAt: checkedAt + 21600000
+        };
+        await ctx.put(`route:${route.id}`, route); existingRoutes.push(route); adoptedRoutes++;
+      }
+    }
+  }
+
+  const discoveredGroups = [...groups.values()];
+  if (discoveredGroups.length > 100) issue(`识别到 ${discoveredGroups.length} 套组合；状态快照只保留前 100 套摘要，已导入的本地映射不受影响。`, '拓扑扫描');
+  const summary = {
+    checkedAt,
+    credentials: credentials.length,
+    readableZones: new Set(zoneRefs.map(x => x.zone.id)).size,
+    groups: discoveredGroups.slice(0, 100).map(g => ({
+      profile: g.profile,
+      recordCount: g.records.length,
+      sampleHostnames: g.records.slice(0, 8).map(r => r.publicHostname),
+      fallbackStatus: g.fallbackStatus,
+      tunnelStatus: g.tunnelStatus
+    })),
+    issues,
+    adoptedProfiles,
+    adoptedRoutes
+  };
+  await ctx.put('topology:last', summary);
+  return summary;
+}
 
 async function profileSnapshot(ctx, profile) {
   const src = await ctx.client(profile.sourceCredentialId), dst = await ctx.client(profile.publicCredentialId);

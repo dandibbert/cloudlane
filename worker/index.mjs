@@ -1,6 +1,6 @@
 import { AppError, requireThat, text, cfId, tunnelId, hostname, inZone, id, now, clone, equal, digest, constantTimeEqual, seal, unseal, validateSecrets, json, safeError } from './core.mjs';
 import { Cloudflare } from './cloudflare.mjs';
-import { buildRoutePlan, buildRollbackPlan, buildDeletePlan, discoverRoutes, syncProfileRoutes, validateProfileLive, planDNS, applyAction, readResource, validationActions, observe, checkEdge } from './planner.mjs';
+import { buildRoutePlan, buildRollbackPlan, buildDeletePlan, discoverRoutes, discoverRemoteTopology, syncProfileRoutes, validateProfileLive, planDNS, applyAction, readResource, validationActions, observe, checkEdge } from './planner.mjs';
 
 const active = job => ['queued', 'running', 'waiting', 'retrying'].includes(job.status);
 const security = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'X-Frame-Options': 'DENY', 'Permissions-Policy': 'camera=(), microphone=(), geolocation=()' };
@@ -85,7 +85,7 @@ export class ControlPlane {
     if (path === '/api/bootstrap' && method === 'GET') {
       let setupError = null;
       try { await validateSecrets(this.env); } catch (e) { setupError = e.message; }
-      return json({ configured: !setupError, setupError, authenticated: !!(await this.authenticated(request)), version: '0.2.3' });
+      return json({ configured: !setupError, setupError, authenticated: !!(await this.authenticated(request)), version: '0.2.4' });
     }
     if (path === '/api/login' && method === 'POST') {
       await validateSecrets(this.env);
@@ -109,12 +109,22 @@ export class ControlPlane {
     await validateSecrets(this.env);
     if (path === '/api/state' && method === 'GET') {
       const [credentials, profiles, routes, jobs, events, discoveries] = await Promise.all(['credential:', 'profile:', 'route:', 'job:', 'audit:', 'discovery:'].map(x => this.list(x)));
+      const topology = await this.get('topology:last');
       return json({
         credentials: credentials.map(({ secret, ...safe }) => safe), profiles, routes,
-        discoveries,
+        discoveries, topology: topology || null,
         jobs: jobs.sort((a, b) => b.createdAt - a.createdAt).slice(0, 100).map(j => this.publicJob(j)),
         events: events.sort((a, b) => b.at - a.at).slice(0, 100), serverTime: now()
       });
+    }
+    if (path === '/api/topology/sync' && method === 'POST') {
+      const input = await bodyOf(request);
+      const [profiles, routes, completed] = await Promise.all([this.list('profile:'), this.list('route:'), this.get('meta:onboarding-discovery-complete')]);
+      const adopt = input.adopt === true && !completed && profiles.length === 0 && routes.length === 0;
+      const result = await discoverRemoteTopology(this, { adopt });
+      if (result.adoptedProfiles || result.adoptedRoutes) await this.put('meta:onboarding-discovery-complete', { at: now() });
+      await this.audit('扫描 Cloudflare 远端拓扑', `识别 ${result.groups.length} 套组合，导入 ${result.adoptedRoutes} 条记录`);
+      return json(result);
     }
     if (path === '/api/export' && method === 'GET') {
       return json({ format: 'cloudlane-config', version: 1, exportedAt: new Date().toISOString(), credentials: (await this.list('credential:')).map(({ secret, ...meta }) => meta), profiles: await this.list('profile:'), routes: (await this.list('route:')).map(({ observed, ...r }) => r) });
@@ -301,7 +311,9 @@ export class ControlPlane {
     }
     requireThat(!(await this.list('job:')).some(j => active(j) && j.plan.profile?.id === profile.id), '方案仍有执行中的任务，暂不能修改。', 409, 'PROFILE_BUSY');
     const live = await validateProfileLive(this, profile); profile.tunnelName = live.tunnel.name;
-    await this.put(`profile:${profile.id}`, profile); await this.audit(previous ? '更新配置方案' : '新增配置方案', profile.name); return profile;
+    await this.put(`profile:${profile.id}`, profile);
+    await this.put('meta:onboarding-discovery-complete', { at: now() });
+    await this.audit(previous ? '更新配置方案' : '新增配置方案', profile.name); return profile;
   }
   publicJob(job) {
     return { id: job.id, type: job.plan.type, routeId: job.plan.routeId, hostname: job.plan.spec.publicHostname, name: job.plan.spec.name, status: job.status, step: job.step, error: job.error, createdAt: job.createdAt, updatedAt: job.updatedAt, nextAt: job.nextAt, completed: job.actions.filter(a => a.state === 'done').length, total: job.actions.length };

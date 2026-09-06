@@ -66,6 +66,52 @@ test('auth, CSRF, password rotation, token redaction, and login limits', async (
   const g = await fixture(); for (let i = 0; i < 8; i++) await g.request('/login', 'POST', { password: 'wrong' }); assert.equal((await g.login()).response.status, 429);
 });
 test('credential API probes zones, encrypts token, and catalogs cross-account public zone separately', async () => { const f = await fixture(); await f.login(); const result = await f.request('/credentials', 'POST', { accountId: A, label: 'new source', token: 'test-unpersisted-plaintext' }); assert.equal(result.response.status, 201); assert(!JSON.stringify(result.body).includes('token')); const row = await f.ctx.get(`credential:${result.body.id}`); assert(row.secret.data); assert(!JSON.stringify(row).includes('test-unpersisted-plaintext')); const catalog = await f.request('/credentials/cred-2/catalog'); assert.equal(catalog.body.zones[0].id, Z2); });
+test('fresh install discovers existing remote topology and adopts it locally without Cloudflare writes', async () => {
+  const f = await fixture();
+  await f.ctx.del('profile:profile-1');
+  f.cf.config.ingress = [
+    { hostname: spec.originHostname, service: spec.service },
+    { hostname: spec.publicHostname, service: spec.service },
+    { service: 'http_status:404' }
+  ];
+  f.cf.rows(Z1).push({ id: 'origin-existing', type: 'CNAME', name: spec.originHostname, content: `${T}.cfargotunnel.com`, ttl: 1, proxied: true });
+  f.cf.rows(Z2).push({ id: 'public-existing', type: 'CNAME', name: spec.publicHostname, content: spec.edgeHostname, ttl: 1, proxied: false });
+  f.cf.customs.push({ id: 'custom-existing', hostname: spec.publicHostname, custom_origin_server: spec.originHostname, status: 'active', ssl: { status: 'pending_validation' } });
+  await f.login();
+  const result = await f.request('/topology/sync', 'POST', { adopt: true });
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.adoptedProfiles, 1);
+  assert.equal(result.body.adoptedRoutes, 1);
+  assert.equal(f.cf.writes().length, 0);
+  const state = await f.request('/state');
+  assert.equal(state.body.profiles.length, 1);
+  assert.equal(state.body.routes.length, 1);
+  assert.equal(state.body.routes[0].imported, true);
+  assert.equal(state.body.routes[0].maintenanceEnabled, false);
+  assert.equal(state.body.routes[0].observed.sslStatus, 'pending_validation');
+  assert(state.body.topology.checkedAt > 0);
+});
+test('topology discovery supports one credential covering both source and public zones in the same account', async () => {
+  const f = await fixture();
+  await f.ctx.del('profile:profile-1');
+  await f.ctx.del('credential:cred-2');
+  f.cf.zones.find(z => z.id === Z2).account.id = A;
+  f.cf.config.ingress = [
+    { hostname: spec.originHostname, service: spec.service },
+    { hostname: spec.publicHostname, service: spec.service },
+    { service: 'http_status:404' }
+  ];
+  f.cf.rows(Z1).push({ id: 'origin-one-token', type: 'CNAME', name: spec.originHostname, content: `${T}.cfargotunnel.com`, ttl: 1, proxied: true });
+  f.cf.rows(Z2).push({ id: 'public-one-token', type: 'CNAME', name: spec.publicHostname, content: spec.edgeHostname, ttl: 1, proxied: false });
+  f.cf.customs.push({ id: 'custom-one-token', hostname: spec.publicHostname, custom_origin_server: spec.originHostname, status: 'active', ssl: { status: 'active' } });
+  await f.login();
+  const result = await f.request('/topology/sync', 'POST', { adopt: true });
+  assert.equal(result.body.adoptedRoutes, 1);
+  const stored = (await f.ctx.list('profile:'))[0];
+  assert.equal(stored.sourceCredentialId, 'cred-1');
+  assert.equal(stored.publicCredentialId, 'cred-1');
+  assert.equal(f.cf.writes().length, 0);
+});
 test('CF client permits paginated /zones query and sanitizes error token', async () => { let pages = 0; const cf = new Cloudflare('secret123', async url => { pages++; return Response.json({ success: true, result: Array(50).fill({ id: pages }), result_info: { total_pages: 2 } }); }); assert.equal((await cf.list('/zones')).length, 100); assert.equal(pages, 2); const err = new Cloudflare('secret123', async () => Response.json({ success: false, errors: [{ message: 'secret123 bad credential' }] }, { status: 403 })); await assert.rejects(err.get('/zones'), e => e.status === 403 && !e.message.includes('secret123')); });
 test('CF client reports runtime fetch failures without falsely calling them timeouts or leaking the token', async () => {
   const cf = new Cloudflare('secret123', async () => { throw new TypeError('Workers routing failed for secret123'); });

@@ -4,7 +4,7 @@
 
 Cloudlane 是面向个人或小团队管理员的自托管面板。它运行在 Cloudflare Workers，使用一个 SQLite-backed Durable Object 保存凭据密文、配置、变更计划和任务。前端为原生 JavaScript/CSS，无运行时依赖、外部字体或分析脚本。界面使用粉、蓝、白配色，支持桌面和手机。
 
-> 版本：0.2.3。已实现真实 Cloudflare API 调用、远端状态同步、持久化任务与受保护的云端删除代码。Workers 配置启用了 `global_fetch_strictly_public`；原生 Cloudflare API `fetch()` 始终从 `globalThis` 直接调用，避免 receiver-sensitive `Illegal invocation`；重定向模式使用 workerd 支持的 `manual` 并显式拒绝 3xx，避免把 Authorization 头带到重定向目标。先用一个非关键测试子域名验收，再管理已有业务。
+> 版本：0.2.4。已实现真实 Cloudflare API 调用、远端状态同步、首次无方案自动发现、持久化任务与受保护的云端删除代码。保存业务凭据后，即使本地还没有配置方案，也会只读扫描可访问的 Zone / SaaS Custom Hostname / Tunnel / DNS；只有完整链路无歧义时才自动创建本地方案与导入映射，整个发现过程不会修改 Cloudflare。Workers API 调用继续使用 `global_fetch_strictly_public`、正确的原生 `fetch` receiver 与 `redirect: manual`。
 
 ## 先看界面
 
@@ -91,8 +91,8 @@ Cloudflare 的套餐、SaaS 额度、Workers/DO 配额与费用以账户当前�
 
 1. **在 Cloudflare 开通源 Zone 的 Cloudflare for SaaS**。涉及套餐或计费确认时由账户管理员完成，面板不会代为开通付费产品。已有 Fallback Origin 会原样保留；没有时可在方案中明确允许初始化。
 2. 在面板的 **API 凭据** 新增账户 ID 和业务 API Token；同一账户的两个 Zone 可以共用凭据，不同账户各添加一套。
-3. 创建 **配置方案**：选择源账户/Zone、访问账户/Zone、Tunnel，填写 `speed.a.com`。已有入口只填入口名称即可；入口不存在时可同时提供待创建的目标。
-4. 已经手工配置过的服务，使用 **导入现有记录**；全新服务使用 **新增优选记录**。输入一个子域名 slug 会自动补全 MAIN/ORIGIN，仍可单独修改。
+3. 如果 Cloudflare 中已经存在完整的优选链，首次同步会尝试自动识别：SaaS `custom_origin_server`、源域名 Tunnel CNAME、成对 Tunnel ingress、访问域名 DNS-only CNAME 必须互相吻合。识别成功时会自动创建**本地配置方案与导入映射**，不会写 Cloudflare，且导入记录默认关闭自动证书维护。
+4. 无法自动识别或准备新建服务时，再手动创建 **配置方案**：选择源账户/Zone、访问账户/Zone、Tunnel，填写 `speed.a.com`。已有入口只填入口名称即可；入口不存在时可同时提供待创建的目标。之后可使用 **导入现有记录** 或 **新增优选记录**。
 5. 预览真实变更并勾选一次确认即可执行，**普通新增/编辑不再要求重复输入完整域名**。默认等待 SaaS hostname 与 Fallback Origin ready 后切换访问 DNS，**不等待 SSL active**。可关闭页面，任务由后端继续执行。
 
 ### 业务 Token 权限
@@ -111,7 +111,7 @@ Cloudflare 的套餐、SaaS 额度、Workers/DO 配额与费用以账户当前�
 
 Cloudflare 才是网络配置的事实源。Cloudlane 的 Durable Object 保存的是**管理映射、显示名称/备注、凭据引用、任务/审计和最近一次远端快照**，而不是拿一份本地表格假装云端仍然如此。
 
-登录后会按配置方案主动同步真实的 Tunnel 配置、Custom Hostnames、源 Zone DNS、访问 Zone DNS 与 Fallback Origin；手动“从 Cloudflare 同步”会立即重读，页面可见时也会周期性刷新。常规 UI 状态轮询只读本地快照，避免每 20 秒对 Cloudflare 全量扫一次。同步发现但尚未管理的链路会作为“可导入记录”提示。
+登录后会主动同步真实的 Tunnel 配置、Custom Hostnames、源 Zone DNS、访问 Zone DNS 与 Fallback Origin。**没有任何配置方案时也不是空操作**：面板先进行一次只读拓扑发现，根据远端已有链路自动建立无歧义的本地方案与导入映射；如果无法安全判断，会把原因保存在最近一次拓扑扫描结果中，而不是猜一个方案。已有方案继续按方案深度同步；手动“从 Cloudflare 同步”会立即重读，页面可见时也会周期性刷新。常规 UI 状态轮询只读本地快照，避免每 20 秒对 Cloudflare 全量扫一次。
 
 如果远端 service、custom origin、优选 CNAME 或其它受管值被手工改动，卡片优先显示最近同步到的真实值，并把相对管理映射的差异标成 drift；修改前仍会重新读取并比较快照。
 
