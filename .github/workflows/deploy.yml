@@ -18,6 +18,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
       - name: Validate deployment secrets
         env:
           ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
@@ -31,9 +32,9 @@ jobs:
           }
           console.log('Deployment secrets passed format checks.');
           JS
-      - run: npm install --no-audit --no-fund
+      - run: npm ci --no-audit --no-fund
       - run: npm test
-      - run: npm run build
+      - run: npm run dry-run
       - run: npx wrangler deploy
       - name: Install application secrets without writing plaintext files
         env:

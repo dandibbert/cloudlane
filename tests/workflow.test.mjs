@@ -74,4 +74,20 @@ test('CF client reports runtime fetch failures without falsely calling them time
     && !error.message.includes('超时')
     && !error.message.includes('secret123'));
 });
+test('CF client keeps the native global fetch receiver instead of triggering Workers Illegal invocation', async () => {
+  const original = globalThis.fetch;
+  let receiver = null;
+  globalThis.fetch = function () {
+    receiver = this;
+    if (this !== globalThis) throw new TypeError('Illegal invocation');
+    return Promise.resolve(Response.json({ success: true, result: [] }));
+  };
+  try {
+    const cf = new Cloudflare('secret123');
+    assert.deepEqual(await cf.get('/zones'), []);
+    assert.equal(receiver, globalThis);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
 test('pagination limit stops instead of falsely calling a partial listing complete', async () => { const cf = new Cloudflare('token', async () => Response.json({ success: true, result: Array(50).fill({ id: 'x' }), result_info: { total_pages: 3 } })); await assert.rejects(cf.list('/zones', {}, 2), { code: 'SCAN_LIMIT' }); });

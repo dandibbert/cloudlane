@@ -52,7 +52,7 @@ export class ControlPlane {
   async client(credentialId) {
     const credential = await this.get(`credential:${credentialId}`);
     requireThat(credential, 'API 凭据不存在或已删除。', 404, 'CREDENTIAL_MISSING');
-    return new Cloudflare(await unseal(credential.secret, this.env.ENCRYPTION_KEY, credential.id), this.env.CF_FETCH || fetch);
+    return new Cloudflare(await unseal(credential.secret, this.env.ENCRYPTION_KEY, credential.id), this.env.CF_FETCH || null);
   }
   async audit(action, detail, jobId = null) {
     const event = { id: id(), at: now(), action, detail, jobId };
@@ -85,7 +85,7 @@ export class ControlPlane {
     if (path === '/api/bootstrap' && method === 'GET') {
       let setupError = null;
       try { await validateSecrets(this.env); } catch (e) { setupError = e.message; }
-      return json({ configured: !setupError, setupError, authenticated: !!(await this.authenticated(request)), version: '0.2.1' });
+      return json({ configured: !setupError, setupError, authenticated: !!(await this.authenticated(request)), version: '0.2.2' });
     }
     if (path === '/api/login' && method === 'POST') {
       await validateSecrets(this.env);
@@ -273,7 +273,7 @@ export class ControlPlane {
     if (input.token) {
       const token = text(input.token, 'API Token', 512);
       requireThat(!/\s/.test(token), 'API Token 不能包含空格或换行。');
-      const client = new Cloudflare(token, this.env.CF_FETCH || fetch);
+      const client = new Cloudflare(token, this.env.CF_FETCH || null);
       const zones = await client.list('/zones', { 'account.id': accountId });
       requireThat(zones.length > 0, 'Token 不能读取此账户的 Zone，请核对账户 ID、Zone Read 权限和资源范围。', 403, 'TOKEN_SCOPE');
       secret = await seal(token, this.env.ENCRYPTION_KEY, cid);

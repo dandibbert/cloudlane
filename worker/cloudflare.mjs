@@ -1,18 +1,30 @@
 import { AppError, requireThat } from './core.mjs';
 
 export class Cloudflare {
-  constructor(token, fetcher = fetch) { this.token = token; this.fetcher = fetcher; }
+  constructor(token, fetcher = null) { this.token = token; this.fetcher = fetcher; }
   async request(path, method = 'GET', body) {
     requireThat(/^\/zones(?:[/?]|$)/.test(path) || /^\/accounts\//.test(path), '不允许的 API 路径。');
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 18000);
     let response;
     try {
-      response = await this.fetcher(`https://api.cloudflare.com/client/v4${path}`, {
+      const url = `https://api.cloudflare.com/client/v4${path}`;
+      const init = {
         method, headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         redirect: 'error', signal: controller.signal
-      });
+      };
+      // Workers' native fetch is receiver-sensitive. Never store the bare global
+      // function on an instance and later invoke it as `this.fetcher(...)`, because
+      // that changes `this` and causes "Illegal invocation" in the Workers runtime.
+      // Test/mocked fetchers are called as plain functions; production uses the
+      // native method directly from globalThis so the correct receiver is preserved.
+      if (this.fetcher) {
+        const fetcher = this.fetcher;
+        response = await fetcher(url, init);
+      } else {
+        response = await globalThis.fetch(url, init);
+      }
     } catch (error) {
       // Never blindly retry a mutation: the server may already have committed it.
       // Keep timeout errors distinct from Workers/runtime routing failures so the UI

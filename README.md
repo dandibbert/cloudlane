@@ -4,7 +4,7 @@
 
 Cloudlane 是面向个人或小团队管理员的自托管面板。它运行在 Cloudflare Workers，使用一个 SQLite-backed Durable Object 保存凭据密文、配置、变更计划和任务。前端为原生 JavaScript/CSS，无运行时依赖、外部字体或分析脚本。界面使用粉、蓝、白配色，支持桌面和手机。
 
-> 版本：0.2.1。已实现真实 Cloudflare API 调用、远端状态同步、持久化任务与受保护的云端删除代码，通过模拟 Cloudflare API 的后端测试与离线浏览器测试。Workers 配置启用了 `global_fetch_strictly_public`，确保对 Cloudflare API 的全局 `fetch()` 按公网路由；API fetch 失败也会区分真正超时与运行时/网络错误。先用一个非关键测试子域名验收，再管理已有业务。
+> 版本：0.2.2。已实现真实 Cloudflare API 调用、远端状态同步、持久化任务与受保护的云端删除代码，通过模拟 Cloudflare API 的后端测试与离线浏览器测试。Workers 配置启用了 `global_fetch_strictly_public`，并且原生 Cloudflare API `fetch()` 始终从 `globalThis` 直接调用，避免 Workers 的 receiver-sensitive `Illegal invocation`；API fetch 失败也会区分真正超时与运行时/网络错误。先用一个非关键测试子域名验收，再管理已有业务。
 
 ## 先看界面
 
@@ -72,16 +72,16 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"
 需要 Node.js 22+、npm、能够下载 Wrangler 的网络环境：
 
 ```sh
-npm install
+npm ci
 npm test
-npm run build
+npm run dry-run
 npx wrangler login
 npm run deploy
 npx wrangler secret put ADMIN_PASSWORD
 npx wrangler secret put ENCRYPTION_KEY
 ```
 
-`npm install` 会生成锁文件，建议之后将它提交到自己的仓库，并把 CI 中的安装改为 `npm ci`。本项目固定 Wrangler 的直接版本为 `4.129.0`；交付环境未下载依赖，因此没有伪造 `package-lock.json`。
+仓库已提交 `package-lock.json`，CI/部署统一使用 `npm ci`，并固定 Wrangler 的直接版本为 `4.129.0`。部署工作流会先执行后端测试与 `wrangler deploy --dry-run`，打包检查通过后才执行真实部署。
 
 不用另外创建 D1/KV：`wrangler.jsonc` 已包含 DO 绑定和 SQLite 类迁移。不要擅自更改 `CONTROL` 绑定、`ControlPlane` 类名、迁移历史或代码中的对象名称，否则可能访问不到原有数据。升级前备份密钥、审阅迁移并保留旧版本。
 
