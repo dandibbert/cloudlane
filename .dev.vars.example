@@ -1,0 +1,4 @@
+# 复制为 .dev.vars 仅用于本地。线上使用 Worker Secrets，绝不要提交真实值。
+ADMIN_PASSWORD=replace-with-a-unique-password-at-least-16-characters
+# 用 node -e "console.log(require('crypto').randomBytes(32).toString('base64'))" 生成。
+ENCRYPTION_KEY=replace-with-base64-encoded-32-byte-random-key

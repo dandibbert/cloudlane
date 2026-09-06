@@ -1,0 +1,43 @@
+name: Deploy Cloudlane
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: cloudlane-production
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate deployment secrets
+        env:
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+        run: |
+          node --input-type=module <<'JS'
+          import { validateSecrets } from './worker/core.mjs';
+          await validateSecrets(process.env);
+          if (!process.env.CLOUDFLARE_API_TOKEN || !/^[a-f0-9]{32}$/i.test(process.env.CLOUDFLARE_ACCOUNT_ID || '')) {
+            throw new Error('Configure CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID repository secrets first.');
+          }
+          console.log('Deployment secrets passed format checks.');
+          JS
+      - run: npm install --no-audit --no-fund
+      - run: npm test
+      - run: npm run build
+      - run: npx wrangler deploy
+      - name: Install application secrets without writing plaintext files
+        env:
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
+          ENCRYPTION_KEY: ${{ secrets.ENCRYPTION_KEY }}
+        run: |
+          node -e 'process.stdout.write(JSON.stringify({ADMIN_PASSWORD:process.env.ADMIN_PASSWORD,ENCRYPTION_KEY:process.env.ENCRYPTION_KEY}))' | npx wrangler secret bulk

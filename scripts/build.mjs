@@ -1,0 +1,16 @@
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+const root = fileURLToPath(new URL('..', import.meta.url));
+const result = spawnSync(process.execPath, [path.join(root, 'scripts/check.mjs')], { stdio: 'inherit' });
+if (result.status !== 0) process.exit(result.status || 1);
+const read = name => readFile(path.join(root, name), 'utf8');
+const modules = await Promise.all(['icons', 'ui', 'demo', 'app'].map(n => read(`public/${n}.mjs`)));
+const code = modules.map(s => s.replace(/^import .*?;\s*$/gm, '').replace(/^export /gm, '')).join('\n');
+if (/<\/script/i.test(code)) throw new Error('Inline script boundary detected. Escape before generating a preview.');
+const css = await read('public/style.css');
+const html = `<!doctype html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>Cloudlane 云径 · 离线交互演示</title><style>${css}</style></head><body><div id="app"></div><div id="toast-region" role="status" aria-live="polite"></div><script type="module">window.CLOUDLANE_OFFLINE_DEMO=true;\n${code}</script></body></html>`;
+await mkdir(path.join(root, 'dist'), { recursive: true });
+await writeFile(path.join(root, 'dist/cloudlane-preview.html'), html);
+console.log('Build complete: static app in public/; Worker entry worker/index.mjs; offline preview dist/cloudlane-preview.html');
