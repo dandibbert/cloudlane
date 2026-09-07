@@ -333,12 +333,32 @@ root.addEventListener('click', e => {
 });
 root.addEventListener('input', e => {
   const el = e.target;
-  if (el.id === 'route-search') { S.search = el.value; return render(); }
+  if (el.id === 'route-search') {
+    S.search = el.value;
+    clearTimeout(S.searchTimer);
+    S.searchTimer = setTimeout(() => {
+      if (!S.modal && document.activeElement?.id === 'route-search') render();
+    }, 120);
+    return;
+  }
   const previousSlug = S.draft.slug;
   if (el.name && el.name !== 'candidate') S.draft[el.name] = el.type === 'checkbox' ? el.checked : el.value;
   if (el.name === 'slug' && !S.draft.id) {
     const p = byId('profiles', S.draft.profileId), slug = el.value.trim().toLowerCase();
-    if (p) { S.draft.publicHostname = slug ? `${slug}.${p.publicZone.name}` : ''; S.draft.originHostname = slug ? `${slug}.${p.sourceZone.name}` : ''; if (!S.draft.name || S.draft.name === previousSlug) S.draft.name = slug; render(); }
+    if (p) {
+      S.draft.publicHostname = slug ? `${slug}.${p.publicZone.name}` : '';
+      S.draft.originHostname = slug ? `${slug}.${p.sourceZone.name}` : '';
+      if (!S.draft.name || S.draft.name === previousSlug) S.draft.name = slug;
+      // High-frequency typing must not rebuild the whole modal. Replacing the focused
+      // input node on every keystroke causes visible flicker and cursor jumps in Chromium/WebKit.
+      const form = el.closest('form');
+      const publicInput = form?.querySelector('input[name="publicHostname"]');
+      const originInput = form?.querySelector('input[name="originHostname"]');
+      const nameInput = form?.querySelector('input[name="name"]');
+      if (publicInput) publicInput.value = S.draft.publicHostname;
+      if (originInput) originInput.value = S.draft.originHostname;
+      if (nameInput && (!nameInput.value || nameInput.value === previousSlug)) nameInput.value = S.draft.name;
+    }
   }
 });
 root.addEventListener('change', e => {
