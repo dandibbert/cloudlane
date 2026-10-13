@@ -115,7 +115,7 @@ with sync_playwright() as p:
     page.locator('input[name="service"]').fill('http://localhost:5231')
     page.locator('button[type="submit"]').click()
     expect(page.locator('#modal-title')).to_contain_text('检查变更')
-    expect(page.locator('.modal .notice.amber')).to_contain_text('notes-test.b.example → notes-updated.b.example')
+    expect(page.locator('.modal .notice.amber').first).to_contain_text('notes-test.b.example → notes-updated.b.example')
     checked('MAIN migration preview explicitly shows old and new hostnames')
     page.locator('input[name="acknowledge"]').check()
     expect(page.locator('input[name="confirmHostname"]')).to_have_count(0)
