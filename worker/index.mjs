@@ -215,7 +215,22 @@ export class ControlPlane {
       await this.ensureIdle(plan.routeId, plan.profile.tunnelId);
       // Reject stale profiles and targets before the first write; every action also rechecks immediately before mutation.
       const liveProfile = await this.get(`profile:${plan.profile.id}`);
-      requireThat(equal(liveProfile, plan.profile), '配置方案已更改，请重新预览。', 409, 'STALE_PLAN');
+      if (plan.newProfile) {
+        requireThat(!liveProfile && equal(plan.newProfile, plan.profile), '新访问 Zone 方案已变化，请重新预览。', 409, 'STALE_PLAN');
+        const original = await this.get(`profile:${plan.sourceProfile?.id}`);
+        requireThat(equal(original, plan.sourceProfile), '原配置方案已变化，请重新预览。', 409, 'STALE_PLAN');
+        requireThat(!(await this.list('profile:')).some(p =>
+          p.sourceCredentialId === plan.profile.sourceCredentialId &&
+          p.accountId === plan.profile.accountId &&
+          equal(p.sourceZone, plan.profile.sourceZone) &&
+          p.tunnelId === plan.profile.tunnelId &&
+          p.publicZone.id === plan.profile.publicZone.id &&
+          p.publicCredentialId === plan.profile.publicCredentialId),
+        '已有方案使用这个访问 Zone，请重新生成预览以复用它。', 409, 'STALE_PLAN');
+        // Do not trust the former catalog result: destination Zone must still be
+        // active and correctly scoped immediately before approving Cloudflare writes.
+        await validateProfileLive(this, plan.profile);
+      } else requireThat(equal(liveProfile, plan.profile), '配置方案已更改，请重新预览。', 409, 'STALE_PLAN');
       if (plan.type === 'route' || plan.type === 'delete') {
         const currentRoute = await this.get(`route:${plan.routeId}`);
         requireThat(equal(currentRoute, plan.previous), '此记录在预览后已变化，请重新预览。', 409, 'STALE_PLAN');
@@ -238,6 +253,7 @@ export class ControlPlane {
       const job = { id: id(), plan: clone(plan), actions: clone(plan.actions), status: 'queued', createdAt: now(), updatedAt: now(), nextAt: now() + 1000, deadline: now() + 86400000, polls: 0, retries: 0, step: '等待执行', error: null };
       plan.jobId = job.id;
       await this.state.storage.transaction(async txn => {
+        if (plan.newProfile) await txn.put(`profile:${plan.newProfile.id}`, plan.newProfile);
         await txn.put(`plan:${plan.id}`, plan); await txn.put(`job:${job.id}`, job);
         if (plan.type === 'route') await txn.put(`route:${plan.routeId}`, { ...plan.previous, ...plan.spec, id: plan.routeId, createdAt: plan.previous?.createdAt || now(), pendingJobId: job.id, lastJobId: job.id, maintenanceEnabled: false, observed: plan.previous?.observed || null });
         if (plan.type === 'delete') await txn.put(`route:${plan.routeId}`, { ...plan.previous, pendingJobId: job.id, lastJobId: job.id });
