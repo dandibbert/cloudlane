@@ -95,6 +95,17 @@ Cloudflare 的套餐、SaaS 额度、Workers/DO 配额与费用以账户当前�
 4. 无法自动识别或准备新建服务时，再手动创建 **配置方案**：选择源账户/Zone、访问账户/Zone、Tunnel，填写 `speed.a.com`。已有入口只填入口名称即可；入口不存在时可同时提供待创建的目标。之后可使用 **导入现有记录** 或 **新增优选记录**。
 5. 预览真实变更并勾选一次确认即可执行，**普通新增/编辑不再要求重复输入完整域名**。默认等待 SaaS hostname 与 Fallback Origin ready 后切换访问 DNS，**不等待 SSL active**。可关闭页面，任务由后端继续执行。
 
+### MAIN 访问域名到期或更换访问 Zone
+
+编辑已有优选记录时，不需要先创建另一套配置方案，也不要手动把整个新域名填进旧方案里：
+
+1. 打开原记录的「编辑」，等待访问 Zone 选项从已保存的业务 API Token 实时读取完成。下拉列表只提供当前仍为 **active** 的访问 Zone；如某个 Token 失效，会显示对应凭据的错误，但不影响其它凭据下的可选 Zone。
+2. 从「访问 Zone · Cloudflare 已识别」选择新域名所属 Zone，例如 `example.com`。然后在「子域名前缀 · MAIN」填写 `load`，最终 MAIN 自动生成 `load.example.com`。也可以填写 `api.load` 等多级子域名。**当前不支持把根域名 `example.com` 本身或通配符作为 MAIN**。
+3. 生成变更预览；原 ORIGIN、源 Zone、Tunnel、EDGE 与 service 保留。新访问 Zone 尚无兼容的 Cloudlane 配置方案时，预览只展示将自动创建的方案，**仅在确认执行后才把方案持久化**。
+4. 成功迁移后，旧 MAIN 的 Cloudflare DNS、Custom Hostname、证书验证记录与 Tunnel ingress 会**原样保留**，不会因为旧 Zone 已过期而让新域名迁移失败。旧资源须另外审查清理；不要在没有确认归属和依赖的情况下直接删除。
+
+如果需要的域名没有出现在下拉框，检查它是否在 Cloudflare 中显示 active、是否在已保存的**业务 Token**范围内、相关凭据是否仍有效。仅有 GitHub Actions 用的 Worker 部署 Token 不会让域名自动出现在面板中。
+
 ### 业务 Token 权限
 
 两个账户可分开授权，也可以由一套凭据管理本账户内的两个 Zone。建议仅授权涉及的 Zone 和 Tunnel 所在账户，不使用 Global API Key。
