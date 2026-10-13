@@ -80,8 +80,20 @@ export async function buildRoutePlan(ctx, input, routeId = undefined) {
   const spec = validateRoute(input, profile);
   const previous = routeId ? await ctx.get(`route:${routeId}`) : null;
   requireThat(!routeId || previous, '记录不存在。', 404);
+  const migratingMain = !!previous && previous.publicHostname !== spec.publicHostname;
   if (previous) {
-    requireThat(previous.profileId === spec.profileId && previous.originHostname === spec.originHostname && previous.publicHostname === spec.publicHostname, '编辑时不改变域名或 Tunnel 归属；迁移请新建记录，验证后再撤下旧记录。', 409, 'MIGRATION_REQUIRED');
+    requireThat(previous.originHostname === spec.originHostname, '源域名 ORIGIN 不支持在此迁移；更换 MAIN 时请保留当前 ORIGIN。', 409, 'MIGRATION_REQUIRED');
+    const originalProfile = await ctx.get(`profile:${previous.profileId}`);
+    requireThat(originalProfile, '原记录的配置方案已删除，无法核对迁移归属。', 409, 'PROFILE_MISSING');
+    if (previous.profileId !== spec.profileId) {
+      requireThat(migratingMain, '切换配置方案时需要同时指定新的 MAIN 访问域名。', 409, 'MIGRATION_REQUIRED');
+      // Moving a MAIN to another public Zone may change its public credential, but must
+      // never move ORIGIN or the underlying Tunnel (which existing routes may share).
+      for (const key of ['sourceCredentialId', 'accountId', 'sourceZone', 'tunnelId']) {
+        requireThat(equal(originalProfile[key], profile[key]), '新方案必须使用原来的源账户、源 Zone 和 Tunnel；仅允许更换访问 Zone。', 409, 'MIGRATION_REQUIRED');
+      }
+    }
+    requireThat(!migratingMain || input.revalidate !== true, '迁移 MAIN 时会为新域名重新申请验证，不能同时刷新旧证书。', 409, 'MIGRATION_REQUIRED');
   }
   const routes = await ctx.list('route:');
   requireThat(!routes.some(r => r.id !== routeId && r.publicHostname === spec.publicHostname), '这个访问域名已被另一条记录管理。', 409, 'DUPLICATE_ROUTE');
@@ -115,8 +127,11 @@ export async function buildRoutePlan(ctx, input, routeId = undefined) {
   if (spec.originRequest === undefined && liveOriginRules.length === 1 && !liveOriginRules[0]?.path && liveOriginRules[0].originRequest !== undefined) {
     spec.originRequest = clone(liveOriginRules[0].originRequest);
   }
-  const rules = [spec.originHostname, spec.publicHostname].map(h => ({ hostname: h, service: spec.service, ...(spec.originRequest === undefined ? {} : { originRequest: spec.originRequest }) }));
-  const merged = mergeIngress(config.config, rules, !!previous);
+  const ruleFor = h => ({ hostname: h, service: spec.service, ...(spec.originRequest === undefined ? {} : { originRequest: spec.originRequest }) });
+  // Existing ORIGIN remains manageable, but the *new* MAIN must not take over someone
+  // else's ingress just because the record itself already existed under its old name.
+  if (migratingMain) requireThat(!matchingIngress(config.config, spec.publicHostname).length, `新 MAIN ${spec.publicHostname} 已有 Tunnel ingress；为避免接管别人的服务，请先检查该规则。`, 409, 'UNMANAGED_CONFLICT');
+  const merged = mergeIngress(mergeIngress(config.config, [ruleFor(spec.originHostname)], !!previous), [ruleFor(spec.publicHostname)], !!previous && !migratingMain);
   if (!equal(config.config, merged)) add(mutation('tunnel', '同步目标 Tunnel ingress（其它规则保持不变）', profile.sourceCredentialId, tunnelPath(profile), { id: profile.tunnelId, value: config.config }, merged, { phase: 'setup', role: 'tunnel', touchedHostnames: [spec.originHostname, spec.publicHostname] }));
 
   // If an entry is already configured, never overwrite it as a side effect of adding a route.
@@ -144,6 +159,7 @@ export async function buildRoutePlan(ctx, input, routeId = undefined) {
     warnings.push('将初始化 Zone 级备用源，不覆盖已有备用源；共享备用源在撤销记录时保留。SaaS 套餐/计费开通仍需账户管理员在 Cloudflare 完成。');
   }
   const custom = await src.custom(profile.sourceZone.id, spec.publicHostname);
+  requireThat(!migratingMain || !custom, `新 MAIN ${spec.publicHostname} 已存在 SaaS Custom Hostname；不能覆盖或冒领已有证书，请先检查其归属。`, 409, 'UNMANAGED_CONFLICT');
   const wantedCustom = { hostname: spec.publicHostname, custom_origin_server: spec.originHostname };
   if (!custom) {
     add(mutation('custom', '创建 SaaS 自定义主机名', profile.sourceCredentialId, customPath(profile.sourceZone.id), null, wantedCustom, {
@@ -191,12 +207,16 @@ export async function buildRoutePlan(ctx, input, routeId = undefined) {
   }
   const ownerRecords = await (await ctx.client(profile.publicCredentialId)).dns(profile.publicZone.id, `_cf-custom-hostname.${spec.publicHostname}`);
   requireThat(!ownerRecords.some(r => r.type === 'CNAME'), '主机名所有权验证处已有 CNAME，无法安全增加 TXT。', 409, 'DNS_CONFLICT');
-  const publicDNS = await planDNS(ctx, { credentialId: profile.publicCredentialId, zoneId: profile.publicZone.id, name: spec.publicHostname, content: spec.edgeHostname, routeId: rid, allowChange: !!previous, phase: 'cutover', role: 'public' });
+  const publicDNS = await planDNS(ctx, { credentialId: profile.publicCredentialId, zoneId: profile.publicZone.id, name: spec.publicHostname, content: spec.edgeHostname, routeId: rid, allowChange: !!previous && !migratingMain, phase: 'cutover', role: 'public' });
   add(publicDNS);
+  if (migratingMain) {
+    warnings.unshift(`MAIN 迁移：${previous.publicHostname} → ${spec.publicHostname}。将先配置新 MAIN，等新域名及备用源就绪后才切换新访问 DNS；旧 MAIN 的 DNS、SaaS 主机名、证书验证记录和 Tunnel ingress 全部保留，避免因旧 Zone 过期导致迁移失败或误删。迁移成功后可另行审查旧资源。`);
+    if (previous.profileId !== spec.profileId) warnings.push(`访问 Zone 已由原方案切换到 ${profile.publicZone.name}。ORIGIN、源 Zone 和 Tunnel 保持不变；旧方案不会被修改。`);
+  }
   if (spec.cutover === 'immediate') warnings.push('你选择了立即切换 DNS：证书签发前 HTTPS 可能无法访问。');
   if (spec.originRequest?.noTLSVerify) warnings.push('已明确开启 noTLSVerify：cloudflared 将不校验本地 HTTPS 服务证书。');
   warnings.push('所有权与证书验证状态会持续显示，但 SSL pending_validation 不再阻断默认 DNS 切换；默认只等待 SaaS 主机名 active 与备用源 active。');
-  return { id: id(), type: 'route', createdAt: now(), expiresAt: now() + 600000, routeId: rid, profile: clone(profile), previous, spec, actions, warnings, dcvSuffix, jobId: null };
+  return { id: id(), type: 'route', createdAt: now(), expiresAt: now() + 600000, routeId: rid, profile: clone(profile), previous, spec, migration: migratingMain ? { from: previous.publicHostname, to: spec.publicHostname, oldProfileId: previous.profileId, newProfileId: profile.id } : null, actions, warnings, dcvSuffix, jobId: null };
 }
 
 export async function readResource(ctx, action) {
