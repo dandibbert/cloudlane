@@ -219,7 +219,17 @@ export class ControlPlane {
       if (plan.type === 'route' || plan.type === 'delete') {
         const currentRoute = await this.get(`route:${plan.routeId}`);
         requireThat(equal(currentRoute, plan.previous), '此记录在预览后已变化，请重新预览。', 409, 'STALE_PLAN');
-        if (plan.type === 'route') requireThat(!(await this.list('route:')).some(r => r.id !== plan.routeId && (r.publicHostname === plan.spec.publicHostname || r.originHostname === plan.spec.originHostname)), '域名已被另一条记录接管，请重新加载。', 409, 'DUPLICATE_ROUTE');
+        if (plan.type === 'route') {
+          const others = (await this.list('route:')).filter(r => r.id !== plan.routeId);
+          requireThat(!others.some(r => r.publicHostname === plan.spec.publicHostname), '访问域名已被另一条记录接管，请重新加载。', 409, 'DUPLICATE_ROUTE');
+          // Shared ORIGIN is legal for aliases on the same Tunnel. Recheck topology at
+          // apply time rather than rejecting every shared origin or trusting old previews.
+          for (const route of others.filter(r => r.originHostname === plan.spec.originHostname)) {
+            const owner = await this.get(`profile:${route.profileId}`);
+            requireThat(owner && owner.accountId === plan.profile.accountId && equal(owner.sourceZone, plan.profile.sourceZone) && owner.tunnelId === plan.profile.tunnelId,
+              '源域名已被另一套源 Zone 或 Tunnel 接管，请重新预览。', 409, 'DUPLICATE_ROUTE');
+          }
+        }
       }
       if (plan.type === 'rollback') requireThat(equal(await this.get(`route:${plan.routeId}`), plan.previous), '记录在撤销预览后已变化，请重新预览。', 409, 'STALE_PLAN');
       const jobs = await this.list('job:');
