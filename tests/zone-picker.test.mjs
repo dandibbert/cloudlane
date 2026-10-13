@@ -148,6 +148,9 @@ test('a stale parallel preview cannot persist a second auto-generated Zone profi
   assert.equal(p2.response.status, 200);
   const applied1 = await f.request('/plans/' + p1.body.id + '/apply', 'POST', { acknowledge: true });
   assert.equal(applied1.response.status, 202);
+  // While job #1 is queued the server returns JOB_BUSY; after it completes,
+  // preview #2 must still be rejected as stale rather than creating a profile.
+  assert.equal((await f.advance(applied1.body.id)).status, 'done');
   const applied2 = await f.request('/plans/' + p2.body.id + '/apply', 'POST', { acknowledge: true });
   assert.equal(applied2.response.status, 409);
   assert.equal(applied2.body.error.code, 'STALE_PLAN');
