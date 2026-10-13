@@ -1,4 +1,4 @@
-import { AppError, requireThat, validateRoute, equal, clone, id, now, mergeIngress, hostname, inZone, summarizeStatus } from './core.mjs';
+import { AppError, requireThat, validateRoute, equal, clone, id, now, mergeIngress, hostname, inZone, summarizeStatus, cfId, text as requiredText } from './core.mjs';
 import { dnsBody, customBody, dnsMatches } from './cloudflare.mjs';
 
 const dnsPath = zone => `/zones/${zone}/dns_records`;
@@ -75,11 +75,48 @@ export async function checkEdge(ctx, profile, edgeHostname, route = null) {
 }
 
 export async function buildRoutePlan(ctx, input, routeId = undefined) {
-  const profile = await ctx.get(`profile:${input.profileId}`);
-  requireThat(profile, '请选择有效的配置方案。', 404);
-  const spec = validateRoute(input, profile);
   const previous = routeId ? await ctx.get(`route:${routeId}`) : null;
   requireThat(!routeId || previous, '记录不存在。', 404);
+  let profile = await ctx.get(`profile:${input.profileId}`);
+  requireThat(profile, '请选择有效的配置方案。', 404);
+  let newProfile = null, sourceProfile = null;
+  // A destination Zone selected from a verified Cloudflare catalog can be used
+  // without creating a separate profile first. Its metadata is only persisted
+  // after the user explicitly approves the complete Cloudflare change preview.
+  if (input.destinationZoneId !== undefined || input.destinationCredentialId !== undefined) {
+    requireThat(previous && input.profileId === previous.profileId,
+      '只支持在编辑现有记录时选择新访问 Zone；必须以原配置方案作为迁移来源。', 409, 'MIGRATION_REQUIRED');
+    sourceProfile = profile;
+    const destinationZoneId = cfId(input.destinationZoneId, '新访问 Zone ID');
+    const destinationCredentialId = requiredText(input.destinationCredentialId, '新访问 Zone 的 API 凭据 ID');
+    if (profile.publicZone.id !== destinationZoneId || profile.publicCredentialId !== destinationCredentialId) {
+      const compatible = (await ctx.list('profile:')).find(p =>
+        p.sourceCredentialId === sourceProfile.sourceCredentialId &&
+        p.accountId === sourceProfile.accountId &&
+        equal(p.sourceZone, sourceProfile.sourceZone) &&
+        p.tunnelId === sourceProfile.tunnelId &&
+        p.publicZone.id === destinationZoneId &&
+        p.publicCredentialId === destinationCredentialId);
+      if (compatible) profile = compatible;
+      else {
+        const cred = await ctx.get(`credential:${destinationCredentialId}`);
+        requireThat(cred, '所选访问 Zone 的 API 凭据已不存在，请刷新域名列表。', 409, 'CREDENTIAL_MISSING');
+        const zone = await (await ctx.client(destinationCredentialId)).get(`/zones/${destinationZoneId}`);
+        requireThat(zone && zone.id === destinationZoneId && zone.account?.id === cred.accountId,
+          '所选访问 Zone 不属于当前凭据账户，请刷新后重选。', 409, 'ZONE_MISMATCH');
+        requireThat(zone.status === 'active', '新访问 Zone 尚未激活，请在 Cloudflare 中确认后再选。', 409, 'ZONE_NOT_ACTIVE');
+        requireThat(zone.id !== sourceProfile.sourceZone.id,
+          '访问 Zone 不能与源 Zone 相同，请选择其它域名。', 409, 'INVALID_ZONE');
+        profile = {
+          ...clone(sourceProfile), id: id(), name: `${sourceProfile.name} → ${zone.name}`.slice(0, 80),
+          publicCredentialId: destinationCredentialId,
+          publicZone: { id: zone.id, name: zone.name }, createdAt: now()
+        };
+        newProfile = clone(profile);
+      }
+    }
+  }
+  const spec = validateRoute(input, profile);
   const migratingMain = !!previous && previous.publicHostname !== spec.publicHostname;
   if (previous) {
     requireThat(previous.originHostname === spec.originHostname, '源域名 ORIGIN 不支持在此迁移；更换 MAIN 时请保留当前 ORIGIN。', 409, 'MIGRATION_REQUIRED');
@@ -216,7 +253,8 @@ export async function buildRoutePlan(ctx, input, routeId = undefined) {
   if (spec.cutover === 'immediate') warnings.push('你选择了立即切换 DNS：证书签发前 HTTPS 可能无法访问。');
   if (spec.originRequest?.noTLSVerify) warnings.push('已明确开启 noTLSVerify：cloudflared 将不校验本地 HTTPS 服务证书。');
   warnings.push('所有权与证书验证状态会持续显示，但 SSL pending_validation 不再阻断默认 DNS 切换；默认只等待 SaaS 主机名 active 与备用源 active。');
-  return { id: id(), type: 'route', createdAt: now(), expiresAt: now() + 600000, routeId: rid, profile: clone(profile), previous, spec, migration: migratingMain ? { from: previous.publicHostname, to: spec.publicHostname, oldProfileId: previous.profileId, newProfileId: profile.id } : null, actions, warnings, dcvSuffix, jobId: null };
+  if (newProfile) warnings.push(`确认执行后会自动保存访问 Zone ${newProfile.publicZone.name} 的新配置方案（本次预览阶段不创建任何配置方案）。`);
+  return { id: id(), type: 'route', createdAt: now(), expiresAt: now() + 600000, routeId: rid, profile: clone(profile), previous, spec, migration: migratingMain ? { from: previous.publicHostname, to: spec.publicHostname, oldProfileId: previous.profileId, newProfileId: profile.id } : null, newProfile, sourceProfile: newProfile ? clone(sourceProfile) : null, actions, warnings, dcvSuffix, jobId: null };
 }
 
 export async function readResource(ctx, action) {

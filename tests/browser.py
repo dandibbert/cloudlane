@@ -107,10 +107,14 @@ with sync_playwright() as p:
 
     new_id = page.locator('.record-title').filter(has_text='Notes Test').get_attribute('data-id')
     page.locator(f'[data-action="edit-route"][data-id="{new_id}"]').click()
-    checked('editing allows MAIN changes', page.locator('input[name="publicHostname"]').get_attribute('readonly') is None)
+    expect(page.locator('#app')).to_have_attribute('aria-busy', 'false')
+    expect(page.locator('select[name="destinationZone"]')).to_have_value('demo-credential-1:' + '2' * 32)
+    checked('editing makes MAIN read-only and derives it from the verified Zone and prefix',
+            page.locator('input[name="publicHostname"]').get_attribute('readonly') is not None)
     checked('editing keeps ORIGIN read-only', page.locator('input[name="originHostname"]').get_attribute('readonly') is not None)
-    checked('editing can select a compatible destination profile', not page.locator('select[name="profileId"]').is_disabled())
-    page.locator('input[name="publicHostname"]').fill('notes-updated.b.example')
+    checked('editing shows a loaded public Zone picker', not page.locator('select[name="destinationZone"]').is_disabled())
+    page.locator('input[name="mainPrefix"]').fill('notes-updated')
+    expect(page.locator('input[name="publicHostname"]')).to_have_value('notes-updated.b.example')
     page.locator('input[name="name"]').fill('<img src=x onerror="window.pwned=1">')
     page.locator('input[name="service"]').fill('http://localhost:5231')
     page.locator('button[type="submit"]').click()
@@ -182,6 +186,32 @@ with sync_playwright() as p:
     close()
     expect(page.locator('.record-card')).to_have_count(7)  # 8 before delete, 1 destructive delete
     checked('destructive cloud deletion has its own preview and typed safety confirmation')
+
+    # A destination Zone which was read from Cloudflare can be chosen directly,
+    # even if no dedicated Cloudlane profile exists for that Zone.
+    reset()
+    page.locator('[data-action="edit-route"][data-id="demo-route-2"]').click()
+    expect(page.locator('#app')).to_have_attribute('aria-busy', 'false')
+    dropdown = page.locator('select[name="destinationZone"]')
+    checked('only active Zones are offered', 'expired.example' not in dropdown.inner_text())
+    checked('a second fetched public Zone is offered', 'c.example' in dropdown.inner_text())
+    dropdown.select_option('demo-credential-1:' + '4' * 32)
+    expect(page.locator('input[name="publicHostname"]')).to_have_value('image.c.example')
+    page.locator('input[name="mainPrefix"]').fill('gallery')
+    expect(page.locator('input[name="publicHostname"]')).to_have_value('gallery.c.example')
+    checked('changing a Zone preserves and recomposes the MAIN prefix automatically')
+    page.locator('button[type="submit"]').click()
+    expect(page.locator('#modal-title')).to_contain_text('检查变更')
+    expect(page.locator('.modal .notice.amber').first).to_contain_text('image.b.example → gallery.c.example')
+    checked('a new Zone previews migration without creating a profile yet')
+    page.locator('input[name="acknowledge"]').check()
+    page.locator('button[type="submit"]').click()
+    expect(page.locator('#modal-title')).to_contain_text('Image Gallery')
+    close()
+    navigation('profiles')
+    expect(page.locator('.resource-card')).to_have_count(3)
+    checked('confirmation creates a compatible public Zone profile in demo')
+    navigation('routes')
 
     # Mobile: actual DOM layout and interactions, not just a resized desktop PNG.
     page.set_viewport_size({'width': 390, 'height': 844})

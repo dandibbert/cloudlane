@@ -39,7 +39,14 @@ export async function demoRequest(state, plans, path, method, body) {
   if (path.includes('/catalog')) {
     const credential = state.credentials.find(c => path.includes(c.id));
     const ps = state.profiles.filter(p => p.sourceCredentialId === credential?.id);
-    return { zones: [...ps.map(p => ({ ...p.sourceZone, status: 'active' })), { ...state.profiles[0].publicZone, status: 'active' }], tunnels: ps.map(p => ({ id: p.tunnelId, name: p.tunnelName, status: 'healthy', remote_config: true })) };
+    return { zones: [
+      ...ps.map(p => ({ ...p.sourceZone, status: 'active' })),
+      { ...state.profiles[0].publicZone, status: 'active' },
+      ...(credential?.id === 'demo-credential-1' ? [
+        { id: '4'.repeat(32), name: 'c.example', status: 'active' },
+        { id: '5'.repeat(32), name: 'expired.example', status: 'pending' }
+      ] : [])
+    ], tunnels: ps.map(p => ({ id: p.tunnelId, name: p.tunnelName, status: 'healthy', remote_config: true })) };
   }
   if (path === '/credentials' || (path.startsWith('/credentials/') && method === 'PUT')) {
     const item = { id: path.split('/')[2] || demoId(), label: body.label, accountId: body.accountId, createdAt: Date.now() };
@@ -60,12 +67,30 @@ export async function demoRequest(state, plans, path, method, body) {
     const edge = path.endsWith('/edge-plan'), rollback = path.endsWith('/rollback-plan'), deleting = path.endsWith('/delete-plan');
     const routeId = deleting ? path.split('/')[2] : body?.routeId;
     const route = state.routes.find(r => r.id === routeId);
-    const profile = state.profiles.find(p => p.id === (body?.profileId || route?.profileId) || path.includes(p.id)) || state.profiles[0];
-    const spec = edge ? { name: '共享入口', publicHostname: profile.edgeHostname, edgeTarget: body.target } : rollback ? { name: '撤销变更', publicHostname: 'image.b.example' } : deleting ? { ...route, ...(route?.remote || {}) } : body;
+    let profile = state.profiles.find(p => p.id === (body?.profileId || route?.profileId) || path.includes(p.id)) || state.profiles[0];
+    let newProfile = null;
+    if (route && body?.destinationZoneId && body?.destinationCredentialId) {
+      const zones = (await demoRequest(state, plans, `/credentials/${body.destinationCredentialId}/catalog`, 'GET')).zones;
+      const zone = zones.find(z => z.id === body.destinationZoneId && z.status === 'active');
+      if (!zone) throw new Error('选中的访问 Zone 不存在或未激活。');
+      if (profile.publicZone.id !== zone.id || profile.publicCredentialId !== body.destinationCredentialId) {
+        const source = state.profiles.find(p => p.id === route.profileId);
+        const existing = state.profiles.find(p =>
+          p.sourceCredentialId === source.sourceCredentialId &&
+          p.sourceZone.id === source.sourceZone.id && p.tunnelId === source.tunnelId &&
+          p.publicZone.id === zone.id && p.publicCredentialId === body.destinationCredentialId);
+        profile = existing || {
+          ...source, id: demoId(), name: `${source.name} → ${zone.name}`,
+          publicCredentialId: body.destinationCredentialId, publicZone: zone
+        };
+        if (!existing) newProfile = profile;
+      }
+    }
+    const spec = edge ? { name: '共享入口', publicHostname: profile.edgeHostname, edgeTarget: body.target } : rollback ? { name: '撤销变更', publicHostname: 'image.b.example' } : deleting ? { ...route, ...(route?.remote || {}) } : { ...body, profileId: profile.id };
     const migration = !edge && !rollback && !deleting && route && route.publicHostname !== spec.publicHostname
       ? { from: route.publicHostname, to: spec.publicHostname, oldProfileId: route.profileId, newProfileId: profile.id } : null;
     const names = edge ? ['更新共享优选入口 CNAME'] : deleting ? ['删除访问域名 CNAME', '删除 SaaS Custom Hostname 与证书', '删除专属源域名 CNAME', '移除 2 条 Tunnel ingress（其它规则保持不变）'] : ['更新 2 条 Tunnel ingress（其它规则保持不变）', '配置源域名 Tunnel CNAME', '创建或更新 SaaS 自定义主机名', '写入 DCV 委派记录', '主机名与备用源就绪后切换访问 DNS'];
-    const plan = { id: demoId(), type: edge ? 'edge' : rollback ? 'rollback' : deleting ? 'delete' : 'route', routeId: routeId || spec.routeId || demoId(), spec, profile, migration, createdAt: Date.now(), expiresAt: Date.now() + 600000, warnings: deleting ? ['演示模式：这是云端删除预览，不会真的删除任何内容。', '共享优选入口与 SaaS Fallback Origin 会保留。'] : ['演示模式：以下是交互示例，不会请求或修改 Cloudflare。', ...(migration ? ['旧 MAIN 的 DNS、SaaS 证书和 Tunnel ingress 会保留；请另行审查清理。'] : []), 'SSL pending_validation 会显示，但不会阻断默认 DNS 切换。'], actions: names.map((label, i) => ({ id: `a${i}`, label, kind: i === 0 && !deleting ? 'tunnel' : deleting && i === names.length - 1 ? 'tunnel' : 'dns', state: 'pending', before: deleting ? { id: `demo-before-${i}`, value: { name: spec.publicHostname } } : null, after: deleting ? null : i === 0 ? { ingress: [{ hostname: spec.publicHostname, service: spec.service || 'http://localhost:63106' }] } : { name: spec.publicHostname, content: spec.edgeHostname || profile.edgeHostname, type: 'CNAME', proxied: i === 1 } })) };
+    const plan = { id: demoId(), type: edge ? 'edge' : rollback ? 'rollback' : deleting ? 'delete' : 'route', routeId: routeId || spec.routeId || demoId(), spec, profile, migration, newProfile, createdAt: Date.now(), expiresAt: Date.now() + 600000, warnings: deleting ? ['演示模式：这是云端删除预览，不会真的删除任何内容。', '共享优选入口与 SaaS Fallback Origin 会保留。'] : ['演示模式：以下是交互示例，不会请求或修改 Cloudflare。', ...(migration ? ['旧 MAIN 的 DNS、SaaS 证书和 Tunnel ingress 会保留；请另行审查清理。'] : []), 'SSL pending_validation 会显示，但不会阻断默认 DNS 切换。'], actions: names.map((label, i) => ({ id: `a${i}`, label, kind: i === 0 && !deleting ? 'tunnel' : deleting && i === names.length - 1 ? 'tunnel' : 'dns', state: 'pending', before: deleting ? { id: `demo-before-${i}`, value: { name: spec.publicHostname } } : null, after: deleting ? null : i === 0 ? { ingress: [{ hostname: spec.publicHostname, service: spec.service || 'http://localhost:63106' }] } : { name: spec.publicHostname, content: spec.edgeHostname || profile.edgeHostname, type: 'CNAME', proxied: i === 1 } })) };
     plans.set(plan.id, plan); return plan;
   }
   if (path.includes('/apply')) {
@@ -74,6 +99,7 @@ export async function demoRequest(state, plans, path, method, body) {
     state.jobs.unshift(job);
     if (plan.type === 'delete') state.routes = state.routes.filter(r => r.id !== plan.routeId);
     if (plan.type === 'route') {
+      if (plan.newProfile) state.profiles.push(plan.newProfile);
       state.routes = state.routes.filter(r => r.id !== plan.routeId);
       state.routes.unshift({ ...plan.spec, id: plan.routeId, lastJobId: job.id, observed: { status: 'ready', checkedAt: Date.now(), tunnelStatus: 'healthy', fallbackStatus: 'active', hostnameStatus: 'active', sslStatus: 'active', dnsReady: true, drift: [] } });
     }

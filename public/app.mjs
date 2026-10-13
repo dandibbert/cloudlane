@@ -225,6 +225,31 @@ function profileModal() {
   return modalFrame(d.id ? '编辑配置方案' : '新建配置方案', '一套方案定义一组账户、Zone、Tunnel 与默认优选入口。', html`${used ? notice('这套方案已有记录。账户、Zone 和 Tunnel 锁定；迁移请创建新方案。', 'blue') : ''}<div class="form-grid">${field('方案名称', 'name', d.name, { required: true, wide: true, placeholder: '例如：日常服务 / 家庭媒体' })}${selectField('源账户凭据', 'sourceCredentialId', d.sourceCredentialId, credentials, { required: true, disabled: used })}${selectField('访问域名凭据', 'publicCredentialId', d.publicCredentialId, credentials, { required: true, disabled: used })}${selectField('源 Zone（a.com）', 'sourceZoneId', d.sourceZoneId, optionize(source?.zones || []), { required: true, disabled: used, hint: '需要已启用 Cloudflare for SaaS。' })}${selectField('访问 Zone（b.com）', 'publicZoneId', d.publicZoneId, optionize(dest?.zones || []), { required: true, disabled: used })}${selectField('Cloudflare Tunnel', 'tunnelId', d.tunnelId, (source?.tunnels || []).map(t => ({ value: t.id, label: `${t.name}${t.remote_config ? '' : ' · 本地配置，不支持'}`, disabled: !t.remote_config })), { required: true, disabled: used, wide: true, hint: '仅支持源账户内、由 Cloudflare 远程管理的 Tunnel。' })}${field('默认优选入口', 'edgeHostname', d.edgeHostname, { required: true, placeholder: 'speed.a.com' })}${field('入口 CNAME 预设目标（可选）', 'edgeTarget', d.edgeTarget, { placeholder: '你已有的优选域名', hint: '仅在入口不存在时创建，不会覆盖已有入口。' })}${selectField('证书验证方式', 'validationMode', d.validationMode, [{ value: 'auto', label: '自动 · 优先 DCV 委派' }, { value: 'delegated', label: '仅 DCV 委派' }, { value: 'txt', label: 'TXT 自动维护' }], { required: true, wide: true })}</div>${source?.warning ? notice(source.warning, 'amber') : ''}<div class="form-section">${checkbox('initializeFallback', '允许初始化缺失的 SaaS 备用源', '只在源 Zone 没有备用源时创建专用 Tunnel CNAME，不修改已有备用源，也不替你开通 SaaS。', d.initializeFallback)}</div>`, formButtons('保存方案', 'check'), { form: 'profile' });
 }
 function wizard(step) { return html`<div class="wizard-steps"><span class="wizard-step ${step === 1 ? 'active' : ''}"><span>1</span>填写连接</span><span class="wizard-connector"></span><span class="wizard-step ${step === 2 ? 'active' : ''}"><span>2</span>检查变更</span><span class="wizard-connector"></span><span class="wizard-step"><span>3</span>确认并跟踪</span></div>`; }
+// MAIN domains are derived from Cloudflare-verified, active public Zones. An
+// expired origin Zone is never offered as a destination merely because it was
+// once saved in a Cloudlane profile.
+const destinationKey = (credentialId, zoneId) => `${credentialId}:${zoneId}`;
+function destinationZones(source) {
+  if (!source) return [];
+  const result = [];
+  for (const credential of S.data.credentials) {
+    for (const zone of S.catalogs[credential.id]?.zones || []) {
+      if (zone.status !== 'active' || zone.id === source.sourceZone.id) continue;
+      result.push({ ...zone, credentialId: credential.id, credentialLabel: credential.label, key: destinationKey(credential.id, zone.id) });
+    }
+  }
+  return result.sort((a, b) => a.name.localeCompare(b.name) || a.credentialLabel.localeCompare(b.credentialLabel));
+}
+function selectedDestination(key, source) { return destinationZones(source).find(z => z.key === key) || null; }
+function composeMain(prefix, zone) {
+  const text = String(prefix || '').trim().toLowerCase().replace(/\.$/, '');
+  if (!text || !zone) return '';
+  return text === zone || text.endsWith(`.${zone}`) ? text : `${text}.${zone}`;
+}
+function mainPrefix(host, zone) {
+  const suffix = `.${zone}`;
+  return host.endsWith(suffix) ? host.slice(0, -suffix.length) : host;
+}
 function routeModal() {
   const d = S.draft, p = byId('profiles', d.profileId);
   const original = d.id && byId('routes', d.id), sourceProfile = original && profileOf(original);
@@ -235,7 +260,17 @@ function routeModal() {
     x.sourceZone.id === sourceProfile.sourceZone.id &&
     x.tunnelId === sourceProfile.tunnelId);
   const changingMain = original && original.publicHostname !== d.publicHostname;
-  return modalFrame(d.id ? '编辑优选记录' : '新建优选记录', '完整预览会在下一步生成；现在还不会修改 Cloudflare。', html`${wizard(1)}${changingMain ? notice(`更换 MAIN：${original.publicHostname} → ${d.publicHostname}。新地址会先创建并验证；过期旧域名的云端资源不会自动删除。`, 'amber', '访问域名迁移') : ''}${d.id ? html`<div class="form-section">${checkbox('revalidate', '重新触发 SaaS 验证', '验证卡住或解除 Zone hold 后使用。会保留原 method/type 发起一次 PATCH；已有任务请先暂停。', d.revalidate)}</div>` : ''}<div class="form-grid">${selectField('配置方案', 'profileId', d.profileId, compatibleProfiles.map(x => ({ value: x.id, label: `${x.name} · ${x.publicZone.name}` })), { required: true, wide: true, hint: p ? `${p.sourceZone.name} → ${p.publicZone.name} · ${p.tunnelName}${d.id ? '。如新 MAIN 属于其它 Zone，请先新建一套使用原源 Zone 和 Tunnel 的方案，再在此选择。' : ''}` : '' })}${field('记录名称', 'name', d.name, { required: true, placeholder: '例如：Image Gallery' })}${!d.id ? field('快捷填入子域名', 'slug', d.slug, { placeholder: '例如：image', hint: '输入后自动补全下方两个域名，也可以手动修改。' }) : field('管理状态', 'management', d.imported ? '已导入 · 确认变更后启用自动维护' : '面板管理', { readonly: true })}${field('访问域名 · MAIN', 'publicHostname', d.publicHostname, { required: true, placeholder: `image.${p?.publicZone.name || 'b.com'}`, hint: d.id ? '可直接更换；新域名必须属于当前选中方案的访问 Zone。ORIGIN 与 Tunnel 不迁移。' : '' })}${field('源域名 · ORIGIN', 'originHostname', d.originHostname, { required: true, readonly: !!d.id, placeholder: `image.${p?.sourceZone.name || 'a.com'}` })}${field('本地服务地址', 'service', d.service, { required: true, wide: true, placeholder: 'http://localhost:1111', hint: '这是 cloudflared 所在环境的地址。容器内的 localhost 与宿主机不是一回事。' })}${field('优选入口 · EDGE', 'edgeHostname', d.edgeHostname, { required: true, wide: true, hint: '指定已有优选域名。更改共享入口目标请到配置方案单独操作。' })}${selectField('DNS 切换时机', 'cutover', d.cutover, [{ value: 'when_ready', label: '推荐 · SaaS 主机名与备用源就绪后切换（不等待 SSL）' }, { value: 'immediate', label: '风险选项 · 配置写入后立即切换，可能短暂不可用' }], { required: true, wide: true })}<label class="field wide"><span>备注</span><textarea id="field-note" name="note" rows="2" maxlength="500" placeholder="用途、设备或需要记住的事项…">${d.note || ''}</textarea></label></div><details class="form-section"><summary>高级回源参数 · originRequest</summary><label class="field wide"><span>JSON 对象</span><textarea id="field-originRequestJSON" name="originRequestJSON" rows="6" spellcheck="false" placeholder='{"httpHostHeader":"example.internal"}'>${d.originRequestJSON || ''}</textarea><small>留空保留已有参数。输入 {} 可清空这两条规则的参数；其它规则和全局配置不会被修改。HTTPS 默认不关闭证书校验。</small></label></details>`, formButtons('生成变更预览', 'arrow'), { form: 'route' });
+  const zones = d.id ? destinationZones(sourceProfile) : [];
+  const currentAvailable = zones.some(z => z.key === d.destinationZone);
+  const options = zones.map(z => ({ value: z.key, label: `${z.name} · ${z.credentialLabel}` }));
+  if (d.id && !currentAvailable && d.destinationZone) options.unshift({
+    value: d.destinationZone, label: `${sourceProfile.publicZone.name} · 当前 Zone（未验证或已失效）`, disabled: true
+  });
+  return modalFrame(d.id ? '编辑优选记录' : '新建优选记录', '完整预览会在下一步生成；现在还不会修改 Cloudflare。', html`${wizard(1)}${d.id && S.modal.zoneErrors?.length ? notice(`部分凭据无法读取 Zone：${S.modal.zoneErrors.join('；')}`, 'amber', '域名列表不完整') : ''}${d.id && !zones.length ? notice('没有读取到可用的访问 Zone。请先确认面板「API 凭据」有效，并至少有一套凭据可以读取已激活的 Cloudflare Zone。', 'amber') : ''}${changingMain ? notice(`更换 MAIN：${original.publicHostname} → ${d.publicHostname}。新地址会先创建并验证；过期旧域名的云端资源不会自动删除。`, 'amber', '访问域名迁移') : ''}${d.id ? html`<div class="form-section">${checkbox('revalidate', '重新触发 SaaS 验证', '验证卡住或解除 Zone hold 后使用。会保留原 method/type 发起一次 PATCH；已有任务请先暂停。', d.revalidate)}</div>` : ''}<div class="form-grid">${d.id
+  ? html`${field('源配置方案 · 保持不变', 'profileLabel', sourceProfile?.name || '', { readonly: true, wide: true, hint: `ORIGIN ${d.originHostname} · Tunnel ${sourceProfile?.tunnelName || ''} 保留；更换访问 Zone 无需新建方案。` })}${selectField('访问 Zone · Cloudflare 已识别', 'destinationZone', d.destinationZone, options, { required: true, wide: true, hint: '仅能选择已读取且状态为 active 的 Zone；不支持 Zone 根域名作为 MAIN。' })}`
+  : selectField('配置方案', 'profileId', d.profileId, compatibleProfiles.map(x => ({ value: x.id, label: `${x.name} · ${x.publicZone.name}` })), { required: true, wide: true, hint: p ? `${p.sourceZone.name} → ${p.publicZone.name} · ${p.tunnelName}` : '' })}${field('记录名称', 'name', d.name, { required: true, placeholder: '例如：Image Gallery' })}${!d.id ? field('快捷填入子域名', 'slug', d.slug, { placeholder: '例如：image', hint: '输入后自动补全下方两个域名，也可以手动修改。' }) : field('管理状态', 'management', d.imported ? '已导入 · 确认变更后启用自动维护' : '面板管理', { readonly: true })}${d.id
+  ? html`${field('子域名前缀 · MAIN', 'mainPrefix', d.mainPrefix, { required: true, placeholder: 'load', hint: '填 load 会得到 load.example.com；也可填完整子域名。不能只填 example.com 根域名。' })}${field('最终访问域名 · MAIN（自动生成）', 'publicHostname', d.publicHostname, { readonly: true, wide: true, hint: '由上方已验证 Zone + 前缀自动组成；不会让你填一个与 Zone 不匹配的域名。' })}`
+  : field('访问域名 · MAIN', 'publicHostname', d.publicHostname, { required: true, placeholder: `image.${p?.publicZone.name || 'b.com'}` })}${field('源域名 · ORIGIN', 'originHostname', d.originHostname, { required: true, readonly: !!d.id, placeholder: `image.${p?.sourceZone.name || 'a.com'}` })}${field('本地服务地址', 'service', d.service, { required: true, wide: true, placeholder: 'http://localhost:1111', hint: '这是 cloudflared 所在环境的地址。容器内的 localhost 与宿主机不是一回事。' })}${field('优选入口 · EDGE', 'edgeHostname', d.edgeHostname, { required: true, wide: true, hint: '指定已有优选域名。更改共享入口目标请到配置方案单独操作。' })}${selectField('DNS 切换时机', 'cutover', d.cutover, [{ value: 'when_ready', label: '推荐 · SaaS 主机名与备用源就绪后切换（不等待 SSL）' }, { value: 'immediate', label: '风险选项 · 配置写入后立即切换，可能短暂不可用' }], { required: true, wide: true })}<label class="field wide"><span>备注</span><textarea id="field-note" name="note" rows="2" maxlength="500" placeholder="用途、设备或需要记住的事项…">${d.note || ''}</textarea></label></div><details class="form-section"><summary>高级回源参数 · originRequest</summary><label class="field wide"><span>JSON 对象</span><textarea id="field-originRequestJSON" name="originRequestJSON" rows="6" spellcheck="false" placeholder='{"httpHostHeader":"example.internal"}'>${d.originRequestJSON || ''}</textarea><small>留空保留已有参数。输入 {} 可清空这两条规则的参数；其它规则和全局配置不会被修改。HTTPS 默认不关闭证书校验。</small></label></details>`, formButtons('生成变更预览', 'arrow'), { form: 'route' });
 }
 function planModal() {
   const p = S.modal.plan, d = S.draft, destructive = p.type === 'delete';
@@ -278,10 +313,26 @@ async function startProfile(id) {
   openModal('profile', draft);
   await work(async () => { await Promise.all([...new Set([draft.sourceCredentialId, draft.publicCredentialId])].map(x => catalog(x))); });
 }
-function startRoute(id) {
+async function startRoute(id) {
   if (!S.data.profiles.length) { toast('先创建配置方案，再添加记录。'); return startProfile(); }
-  const old = id && byId('routes', id), p = S.data.profiles.find(x => x.id === S.filterProfile) || S.data.profiles[0];
-  openModal('route', old ? { ...old, service: old.remote?.service || old.service, edgeHostname: old.remote?.edgeHostname || old.edgeHostname, originRequest: old.remote?.originRequest ?? old.originRequest, originRequestJSON: (old.remote?.originRequest ?? old.originRequest) === undefined ? '' : pretty(old.remote?.originRequest ?? old.originRequest) } : { profileId: p.id, edgeHostname: p.edgeHostname, service: 'http://localhost:', cutover: 'when_ready', slug: '', name: '', publicHostname: '', originHostname: '' });
+  const old = id && byId('routes', id), p = old ? profileOf(old) : S.data.profiles.find(x => x.id === S.filterProfile) || S.data.profiles[0];
+  openModal('route', old ? {
+    ...old, service: old.remote?.service || old.service,
+    edgeHostname: old.remote?.edgeHostname || old.edgeHostname,
+    originRequest: old.remote?.originRequest ?? old.originRequest,
+    originRequestJSON: (old.remote?.originRequest ?? old.originRequest) === undefined ? '' : pretty(old.remote?.originRequest ?? old.originRequest),
+    destinationZone: destinationKey(p.publicCredentialId, p.publicZone.id),
+    mainPrefix: mainPrefix(old.publicHostname, p.publicZone.name)
+  } : { profileId: p.id, edgeHostname: p.edgeHostname, service: 'http://localhost:', cutover: 'when_ready', slug: '', name: '', publicHostname: '', originHostname: '' });
+  if (old) await work(async () => {
+    const failures = [];
+    // Always fetch live zones when opening a migration editor. One revoked Token
+    // must not suppress valid Zones available through other saved credentials.
+    await Promise.all(S.data.credentials.map(async c => {
+      try { await catalog(c.id, true); } catch (e) { delete S.catalogs[c.id]; failures.push(`${c.label}: ${e.message}`); }
+    }));
+    if (S.modal?.kind === 'route' && S.draft.id === old.id) S.modal.zoneErrors = failures;
+  });
 }
 function startImport(profileId) {
   if (!S.data.profiles.length) { toast('先选择好账户、Zone 和 Tunnel。'); return startProfile(); }
@@ -351,6 +402,13 @@ root.addEventListener('input', e => {
   }
   const previousSlug = S.draft.slug;
   if (el.name && el.name !== 'candidate') S.draft[el.name] = el.type === 'checkbox' ? el.checked : el.value;
+  if (el.name === 'mainPrefix' && S.draft.id && S.modal?.kind === 'route') {
+    const source = profileOf(byId('routes', S.draft.id));
+    const zone = selectedDestination(S.draft.destinationZone, source);
+    S.draft.publicHostname = composeMain(el.value, zone?.name);
+    const mainInput = el.closest('form')?.querySelector('input[name="publicHostname"]');
+    if (mainInput) mainInput.value = S.draft.publicHostname;
+  }
   if (el.name === 'slug' && !S.draft.id) {
     const p = byId('profiles', S.draft.profileId), slug = el.value.trim().toLowerCase();
     if (p) {
@@ -375,6 +433,12 @@ root.addEventListener('change', e => {
   if (el.name === 'candidate') { el.checked ? S.selected.add(el.value) : S.selected.delete(el.value); return render(); }
   if (!el.name) return;
   S.draft[el.name] = el.type === 'checkbox' ? el.checked : el.value;
+  if (el.name === 'destinationZone' && S.modal?.kind === 'route' && S.draft.id) {
+    const source = profileOf(byId('routes', S.draft.id));
+    const zone = selectedDestination(el.value, source);
+    S.draft.publicHostname = composeMain(S.draft.mainPrefix, zone?.name);
+    return render();
+  }
   if (el.name === 'profileId' && S.modal?.kind === 'route') {
     const p = byId('profiles', el.value);
     if (p) {
@@ -415,7 +479,21 @@ root.addEventListener('submit', e => {
     if (kind === 'route') {
       let originRequest;
       if (draft.originRequestJSON?.trim()) { try { originRequest = JSON.parse(draft.originRequestJSON); } catch { throw new Error('originRequest 不是有效 JSON。'); } }
-      return showPlan(await api('/plans', 'POST', { profileId: draft.profileId, routeId: draft.id, name: draft.name, publicHostname: draft.publicHostname, originHostname: draft.originHostname, edgeHostname: draft.edgeHostname, service: draft.service, originRequest, note: draft.note, cutover: draft.cutover, revalidate: draft.revalidate === true }));
+      let destination = null, publicHostname = draft.publicHostname;
+      if (draft.id) {
+        const original = byId('routes', draft.id), source = original && profileOf(original);
+        destination = selectedDestination(draft.destinationZone, source);
+        if (!destination) throw new Error('请选择已读取且状态为 active 的访问 Zone；当前旧 Zone 可能已经失效。');
+        publicHostname = composeMain(draft.mainPrefix, destination.name);
+        if (!publicHostname || publicHostname === destination.name)
+          throw new Error('MAIN 需要子域名前缀，例如 load；当前版本不支持直接使用根域名。');
+      }
+      return showPlan(await api('/plans', 'POST', {
+        profileId: draft.profileId, routeId: draft.id, name: draft.name, publicHostname,
+        originHostname: draft.originHostname, edgeHostname: draft.edgeHostname, service: draft.service,
+        originRequest, note: draft.note, cutover: draft.cutover, revalidate: draft.revalidate === true,
+        ...(destination ? { destinationCredentialId: destination.credentialId, destinationZoneId: destination.id } : {})
+      }));
     }
     if (kind === 'apply') {
       if (!draft.acknowledge) throw new Error('请先确认已检查变更与影响范围。');
